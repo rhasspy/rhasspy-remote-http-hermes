@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+if [[ -z "${rhasspyremote_http_hermes_dir}" ]]; then
+    this_dir="$( cd "$( dirname "$0" )" && pwd )"
+    rhasspyremote_http_hermes_dir="${this_dir}/../lib/rhasspyremote_http_hermes"
+fi
+
+"${rhasspyremote_http_hermes_dir}/rhasspyremote_http_hermes" "$@"
