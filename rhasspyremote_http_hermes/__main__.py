@@ -1,6 +1,7 @@
 """Hermes MQTT service for remote Rhasspy server"""
 import argparse
 import logging
+import shlex
 
 import paho.mqtt.client as mqtt
 
@@ -17,16 +18,29 @@ def main():
         help="URL of remote speech to text server (e.g., http://localhost:12101/api/speech-to-text)",
     )
     parser.add_argument(
+        "--asr-command", help="Command to execute for ASR (WAV to text)"
+    )
+    parser.add_argument(
         "--nlu-url",
         help="URL of remote intent recognition server (e.g., http://localhost:12101/api/text-to-intent)",
+    )
+    parser.add_argument(
+        "--nlu-command", help="Command to execute for NLU (text to intent)"
     )
     parser.add_argument(
         "--tts-url",
         help="URL of remote text to speech server (e.g., http://localhost:12101/api/text-to-speech)",
     )
+    parser.add_argument(
+        "--tts-command", help="Command to execute for TTS (text to WAV)"
+    )
     # parser.add_argument(
     #     "--handle-url",
     #     help="URL of remote intent handling server (e.g., http://my-server:port/endpoint",
+    # )
+    # parser.add_argument(
+    #     "--handle-command",
+    #     help="Command to execute for intent handling",
     # )
     parser.add_argument(
         "--host", default="localhost", help="MQTT host (default: localhost)"
@@ -51,14 +65,27 @@ def main():
 
     _LOGGER.debug(args)
 
+    # Split commands
+    if args.asr_command:
+        args.asr_command = shlex.split(args.asr_command)
+
+    if args.nlu_command:
+        args.nlu_command = shlex.split(args.nlu_command)
+
+    if args.tts_command:
+        args.tts_command = shlex.split(args.tts_command)
+
     try:
         # Listen for messages
         client = mqtt.Client()
         hermes = RemoteHermesMqtt(
             client,
             asr_url=args.asr_url,
+            asr_command=args.asr_command,
             nlu_url=args.nlu_url,
+            nlu_command=args.nlu_command,
             tts_url=args.tts_url,
+            tts_command=args.tts_command,
             siteIds=args.siteId,
         )
 

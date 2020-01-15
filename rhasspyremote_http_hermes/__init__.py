@@ -2,6 +2,7 @@
 import io
 import json
 import logging
+import subprocess
 import typing
 import wave
 
@@ -38,15 +39,25 @@ class RemoteHermesMqtt:
     def __init__(
         self,
         client,
-        nlu_url: typing.Optional[str] = None,
         asr_url: typing.Optional[str] = None,
+        asr_command: typing.Optional[typing.List[str]] = None,
+        nlu_url: typing.Optional[str] = None,
+        nlu_command: typing.Optional[typing.List[str]] = None,
         tts_url: typing.Optional[str] = None,
+        tts_command: typing.Optional[typing.List[str]] = None,
         siteIds: typing.Optional[typing.List[str]] = None,
     ):
         self.client = client
-        self.nlu_url = nlu_url
+
         self.asr_url = asr_url
+        self.asr_command = asr_command
+
+        self.nlu_url = nlu_url
+        self.nlu_command = nlu_command
+
         self.tts_url = tts_url
+        self.tts_command = tts_command
+
         self.siteIds = siteIds or []
 
         # sessionId -> AsrSession
@@ -66,10 +77,31 @@ class RemoteHermesMqtt:
         _LOGGER.debug("<- %s", query)
 
         try:
-            response = requests.post(self.nlu_url, data=query.input)
-            response.raise_for_status()
-            intent_dict = response.json()
-            intent_name = intent_dict["intent"]["name"]
+            if self.nlu_url:
+                # Use remote server
+                _LOGGER.debug(self.nlu_url)
+                response = requests.post(self.nlu_url, data=query.input)
+                response.raise_for_status()
+                intent_dict = response.json()
+            elif self.nlu_command:
+                # Run external command
+                _LOGGER.debug(self.nlu_command)
+                proc = subprocess.Popen(
+                    self.nlu_command,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    universal_newlines=True,
+                )
+
+                print(query.input, file=proc.stdin)
+                output, _ = proc.communicate()
+
+                intent_dict = json.loads(output)
+            else:
+                _LOGGER.warn("Not handling NLU query (no URL or command)")
+                return
+
+            intent_name = intent_dict["intent"].get("name", "")
 
             if intent_name:
                 # Recognized
@@ -81,7 +113,9 @@ class RemoteHermesMqtt:
                         sessionId=query.sessionId,
                         intent=Intent(
                             intentName=intent_name,
-                            confidenceScore=intent_dict["intent"]["confidence"],
+                            confidenceScore=intent_dict["intent"].get(
+                                "confidence", 1.0
+                            ),
                         ),
                         slots=[
                             Slot(
@@ -89,10 +123,13 @@ class RemoteHermesMqtt:
                                 slotName=e["entity"],
                                 confidence=1,
                                 value=e["value"],
-                                raw_value=e["raw_value"],
-                                range=SlotRange(start=e["raw_start"], end=e["raw_end"]),
+                                raw_value=e.get("raw_value", e["value"]),
+                                range=SlotRange(
+                                    start=e.get("raw_start", e.get("start", 0)),
+                                    end=e.get("raw_end", e.get("end", 1)),
+                                ),
                             )
-                            for e in intent_dict["entities"]
+                            for e in intent_dict.get("entities", [])
                         ],
                     ),
                     intentName=intent_name,
