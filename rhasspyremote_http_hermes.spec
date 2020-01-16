@@ -23,7 +23,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="rhasspynlu_hermes",
+    name="rhasspyremote_http_hermes",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -37,5 +37,5 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=True,
-    name="rhasspynlu_hermes",
+    name="rhasspyremote_http_hermes",
 )

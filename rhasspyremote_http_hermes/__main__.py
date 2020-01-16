@@ -12,7 +12,7 @@ _LOGGER = logging.getLogger(__name__)
 
 def main():
     """Main method."""
-    parser = argparse.ArgumentParser(prog="rhasspyremote_http_hermes")
+    parser = argparse.ArgumentParser(prog="rhasspy-remote-http-hermes")
     parser.add_argument(
         "--asr-url",
         help="URL of remote speech to text server (e.g., http://localhost:12101/api/speech-to-text)",
