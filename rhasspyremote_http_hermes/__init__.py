@@ -7,14 +7,13 @@ import typing
 import wave
 
 import attr
+import requests
 from rhasspyhermes.asr import AsrStartListening, AsrStopListening, AsrTextCaptured
+from rhasspyhermes.audioserver import AudioFrame, AudioPlayBytes
 from rhasspyhermes.base import Message
-from rhasspyhermes.audioserver import AudioPlayBytes, AudioFrame
 from rhasspyhermes.intent import Intent, Slot, SlotRange
 from rhasspyhermes.nlu import NluError, NluIntent, NluIntentNotRecognized, NluQuery
 from rhasspyhermes.tts import TtsSay, TtsSayFinished
-
-import requests
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -98,7 +97,7 @@ class RemoteHermesMqtt:
 
                 intent_dict = json.loads(output)
             else:
-                _LOGGER.warn("Not handling NLU query (no URL or command)")
+                _LOGGER.warning("Not handling NLU query (no URL or command)")
                 return
 
             intent_name = intent_dict["intent"].get("name", "")

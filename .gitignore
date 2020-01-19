@@ -6,3 +6,4 @@ debian/rhasspy-remote-http-hermes*
 dist/
 *.egg-info/
 pyinstaller/
+.vscode/

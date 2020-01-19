@@ -1,5 +1,6 @@
 """Setup for rhasspyremote_http_hermes"""
 import os
+
 import setuptools
 
 this_dir = os.path.abspath(os.path.dirname(__file__))

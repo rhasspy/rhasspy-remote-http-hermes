@@ -1,5 +1,8 @@
 # Rhasspy Remote HTTP Hermes
 
+[![Continous Integration](https://github.com/rhasspy/rhasspy-remote-http-hermes/workflows/Tests/badge.svg)](https://github.com/rhasspy/rhasspy-remote-http-hermes/actions)
+[![GitHub license](https://img.shields.io/github/license/rhasspy/rhasspy-remote-http-hermes.svg)](https://github.com/rhasspy/rhasspy-remote-http-hermes/blob/master/LICENSE)
+
 Implements `hermes/asr`, `hermes/nlu`, `hermes/tts`, and intent handling functionality from [Hermes protocol](https://docs.snips.ai/reference/hermes) using a remote Rhasspy server's HTTP API.
 
 ## Running With Docker

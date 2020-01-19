@@ -3,8 +3,9 @@ PYTHON_NAME = rhasspyremote_http_hermes
 PACKAGE_NAME = rhasspy-remote-http-hermes
 SOURCE = $(PYTHON_NAME)
 PYTHON_FILES = $(SOURCE)/*.py *.py
+SHELL_FILES = bin/* debian/bin/* *.sh
 
-.PHONY: check dist venv test pyinstaller debian deploy
+.PHONY: reformat check dist venv test pyinstaller debian deploy
 
 version := $(shell cat VERSION)
 architecture := $(shell bash architecture.sh)
@@ -16,10 +17,19 @@ debian_dir := debian/$(debian_package)
 # Python
 # -----------------------------------------------------------------------------
 
+reformat:
+	black .
+	isort $(PYTHON_FILES)
+
 check:
 	flake8 $(PYTHON_FILES)
 	pylint $(PYTHON_FILES)
 	mypy $(PYTHON_FILES)
+	black --check .
+	isort --check-only $(PYTHON_FILES)
+	bashate $(SHELL_FILES)	
+	yamllint .
+	pip list --outdated	
 
 venv:
 	rm -rf .venv/
