@@ -25,7 +25,7 @@ class AsrSession:
     """WAV buffer for an ASR session"""
 
     start_listening: AsrStartListening = attr.ib()
-    wav_io: typing.BinaryIO = attr.ib()
+    wav_io: io.BytesIO = attr.ib()
     wav_file: typing.Optional[wave.Wave_write] = attr.ib(default=None)
 
 
@@ -162,6 +162,7 @@ class RemoteHermesMqtt:
             if say.lang:
                 post_args["language"] = say.lang
 
+            assert self.tts_url
             response = requests.post(self.tts_url, **post_args)
             response.raise_for_status()
 
@@ -220,9 +221,12 @@ class RemoteHermesMqtt:
 
         try:
             session = self.asr_sessions.pop(stop_listening.sessionId)
+            assert session.wav_file
             session.wav_file.close()
 
             # Post entire WAV file
+            assert session.wav_io
+            assert self.asr_url
             response = requests.post(
                 self.asr_url,
                 data=session.wav_io.getvalue(),
