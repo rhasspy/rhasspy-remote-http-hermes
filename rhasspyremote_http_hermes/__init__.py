@@ -20,13 +20,13 @@ _LOGGER = logging.getLogger(__name__)
 # -----------------------------------------------------------------------------
 
 
-@attr.s
+@attr.s(auto_attribs=True)
 class AsrSession:
     """WAV buffer for an ASR session"""
 
-    start_listening: AsrStartListening = attr.ib()
-    wav_io: io.BytesIO = attr.ib()
-    wav_file: typing.Optional[wave.Wave_write] = attr.ib(default=None)
+    start_listening: AsrStartListening
+    wav_io: io.BytesIO
+    wav_file: typing.Optional[wave.Wave_write] = None
 
 
 # -----------------------------------------------------------------------------
