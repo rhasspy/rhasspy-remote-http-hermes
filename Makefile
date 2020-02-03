@@ -27,17 +27,12 @@ check:
 	mypy $(PYTHON_FILES)
 	black --check .
 	isort --check-only $(PYTHON_FILES)
-	bashate $(SHELL_FILES)	
+	bashate $(SHELL_FILES)
 	yamllint .
-	pip list --outdated	
+	pip list --outdated
 
 venv:
-	rm -rf .venv/
-	python3 -m venv .venv
-	.venv/bin/pip3 install --upgrade pip
-	.venv/bin/pip3 install wheel setuptools
-	.venv/bin/pip3 install -r requirements.txt
-	.venv/bin/pip3 install -r requirements_dev.txt
+	scripts/create-venv.sh
 
 test:
 	coverage run -m unittest test
@@ -59,7 +54,7 @@ docker: pyinstaller
 
 deploy:
 	echo "$$DOCKER_PASSWORD" | docker login -u "$$DOCKER_USERNAME" --password-stdin
-	docker push rhasspy/$(PACKAGE_NAME):$(version)
+	docker push "rhasspy/$(PACKAGE_NAME):$(version)"
 
 # -----------------------------------------------------------------------------
 # Debian
