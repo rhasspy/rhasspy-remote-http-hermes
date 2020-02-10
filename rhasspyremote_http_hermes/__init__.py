@@ -3,12 +3,19 @@ import io
 import json
 import logging
 import subprocess
+import time
 import typing
 import wave
 
 import attr
 import requests
-from rhasspyhermes.asr import AsrStartListening, AsrStopListening, AsrTextCaptured
+from rhasspyhermes.asr import (
+    AsrStartListening,
+    AsrStopListening,
+    AsrTextCaptured,
+    AsrError,
+    AsrAudioCaptured,
+)
 from rhasspyhermes.audioserver import AudioFrame, AudioPlayBytes
 from rhasspyhermes.base import Message
 from rhasspyhermes.intent import Intent, Slot, SlotRange
@@ -61,11 +68,6 @@ class RemoteHermesMqtt:
 
         # sessionId -> AsrSession
         self.asr_sessions: typing.Dict[str, AsrSession] = {}
-
-        # Topic to listen for WAV chunks on
-        self.audioframe_topics: typing.List[str] = []
-        for siteId in self.siteIds:
-            self.audioframe_topics.append(AudioFrame.topic(siteId=siteId))
 
         self.first_audio: bool = True
 
@@ -158,24 +160,47 @@ class RemoteHermesMqtt:
         _LOGGER.debug("<- %s", say)
 
         try:
-            post_args = {"data": say.text}
-            if say.lang:
-                post_args["language"] = say.lang
+            if self.tts_url:
+                post_args = {"data": say.text}
+                if say.lang:
+                    post_args["language"] = say.lang
 
-            assert self.tts_url
-            response = requests.post(self.tts_url, **post_args)
-            response.raise_for_status()
+                response = requests.post(self.tts_url, **post_args)
+                response.raise_for_status()
 
-            print(response.headers)
-            if response.headers["Content-Type"] == "audio/wav":
-                self.client.publish(
-                    AudioPlayBytes.topic(siteId=say.siteId, requestId=say.id),
-                    response.content,
+                content_type = response.headers["Content-Type"]
+                if content_type == "audio/wav":
+                    self.publish(
+                        AudioPlayBytes.topic(siteId=say.siteId, requestId=say.id),
+                        response.content,
+                    )
+                else:
+                    _LOGGER.warning(
+                        "Expected audio/wav content type, got %s", content_type
+                    )
+            elif self.tts_command:
+                _LOGGER(self.tts_command)
+                proc = subprocess.run(
+                    self.tts_command,
+                    input=say.text.encode(),
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                 )
 
-            self.publish(TtsSayFinished(id=say.id, sessionId=say.sessionId))
+                if proc.stderr:
+                    _LOGGER.debug(proc.stderr.decode())
+
+                self.client.publish(
+                    AudioPlayBytes(proc.stdout),
+                    siteId=say.siteId,
+                    requestId=say.id,
+                )
+
         except Exception:
             _LOGGER.exception("handle_say")
+        finally:
+            self.publish(TtsSayFinished(id=say.id, sessionId=say.sessionId))
 
     # -------------------------------------------------------------------------
 
@@ -196,7 +221,7 @@ class RemoteHermesMqtt:
     def handle_audio_frame(self, wav_bytes: bytes, siteId: str = "default"):
         """Add audio frame to open sessions."""
         try:
-            # Add to all open session
+            # Add to all open sessions
             with io.BytesIO(wav_bytes) as in_io:
                 with wave.open(in_io) as in_wav:
                     for session in self.asr_sessions.values():
@@ -224,48 +249,105 @@ class RemoteHermesMqtt:
             assert session.wav_file
             session.wav_file.close()
 
-            # Post entire WAV file
+            # Process entire WAV file
             assert session.wav_io
-            assert self.asr_url
-            response = requests.post(
-                self.asr_url,
-                data=session.wav_io.getvalue(),
-                headers={"Content-Type": "audio/wav", "Accept": "application/json"},
-            )
-            response.raise_for_status()
+            wav_bytes = session.wav_io.getvalue()
 
-            transcription_dict = response.json()
+            if self.asr_url:
+                # Remote ASR server
+                response = requests.post(
+                    self.asr_url,
+                    data=wav_bytes,
+                    headers={"Content-Type": "audio/wav", "Accept": "application/json"},
+                )
+                response.raise_for_status()
+
+                transcription_dict = response.json()
+            elif self.asr_command:
+                # Local ASR command
+                _LOGGER.debug(self.asr_command)
+
+                start_time = time.perf_counter()
+                proc = subprocess.run(
+                    self.asr_command,
+                    input=wav_bytes,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=True,
+                )
+
+                if proc.stderr:
+                    _LOGGER.debug(proc.stderr.decode())
+
+                text = proc.stdout.decode()
+                end_time = time.perf_counter()
+
+                transcription_dict = {
+                    "text": text,
+                    "transcribe_seconds": (end_time - start_time),
+                }
+            else:
+                # Empty transcription
+                _LOGGER.warning(
+                    "No ASR URL or command. Only empty transcriptions will be returned."
+                )
+                transcription_dict = {}
+
+            # Publish transcription
             self.publish(
                 AsrTextCaptured(
-                    text=transcription_dict["text"],
-                    likelihood=transcription_dict["likelihood"],
-                    seconds=transcription_dict["transcribe_seconds"],
+                    text=transcription_dict.get("text", ""),
+                    likelihood=float(transcription_dict.get("likelihood", 0)),
+                    seconds=float(transcription_dict.get("transcribe_seconds", 0)),
                     siteId=stop_listening.siteId,
                     sessionId=stop_listening.sessionId,
                 )
             )
 
-        except Exception:
+            if session.start_listening.sendAudioCaptured:
+                # Send audio data
+                self.publish(
+                    AsrAudioCaptured(wav_bytes),
+                    siteId=stop_listening.siteId,
+                    sessionId=stop_listening.sessionId,
+                )
+
+        except Exception as e:
             _LOGGER.exception("handle_stop_listening")
+            self.publish(
+                AsrError(
+                    error=str(e),
+                    context=f"url='{self.asr_url}', command='{self.asr_command}'",
+                    siteId=stop_listening.siteId,
+                    sessionId=stop_listening.sessionId,
+                )
+            )
 
     # -------------------------------------------------------------------------
 
     def on_connect(self, client, userdata, flags, rc):
         """Connected to MQTT broker."""
         try:
-            topics = [
-                NluQuery.topic(),
-                AsrStartListening.topic(),
-                AsrStopListening.topic(),
-                TtsSay.topic(),
-            ]
+            topics = []
 
-            if self.audioframe_topics:
-                # Specific siteIds
-                topics.extend(self.audioframe_topics)
-            else:
-                # All siteIds
-                topics.append(AudioFrame.topic(siteId="+"))
+            if self.asr_url or self.asr_command:
+                topics.extend([AsrStartListening.topic(), AsrStopListening.topic()])
+
+                # Subscribe to audio too
+                if self.siteIds:
+                    # Specific site ids
+                    topics.extend(
+                        AudioFrame.topic(siteId=siteId) for siteId in self.siteIds
+                    )
+                else:
+                    # All site ids
+                    topics.append(AudioFrame.topic(siteId="+"))
+
+            if self.nlu_url or self.nlu_command:
+                topics.append(NluQuery.topic())
+
+            if self.tts_url or self.tts_command:
+                topics.append(TtsSay.topic())
 
             for topic in topics:
                 self.client.subscribe(topic)
@@ -281,15 +363,13 @@ class RemoteHermesMqtt:
 
             if AudioFrame.is_topic(msg.topic):
                 # Check siteId
-                if (not self.audioframe_topics) or (
-                    msg.topic in self.audioframe_topics
-                ):
+                siteId = AudioFrame.get_siteId(msg.topic)
+                if (not self.siteIds) or (siteId in self.siteIds):
                     # Add to all active sessions
                     if self.first_audio:
                         _LOGGER.debug("Receiving audio")
                         self.first_audio = False
 
-                    siteId = AudioFrame.get_siteId(msg.topic)
                     self.handle_audio_frame(msg.payload, siteId=siteId)
             elif msg.topic == NluQuery.topic():
                 json_payload = json.loads(msg.payload)
@@ -321,9 +401,18 @@ class RemoteHermesMqtt:
     def publish(self, message: Message, **topic_args):
         """Publish a Hermes message to MQTT."""
         try:
-            _LOGGER.debug("-> %s", message)
+            if isinstance(message, (AudioPlayBytes, AsrAudioCaptured)):
+                _LOGGER.debug(
+                    "-> %s(%s byte(s))",
+                    message.__class__.__name__,
+                    len(message.wav_bytes),
+                )
+                payload = message.wav_bytes
+            else:
+                _LOGGER.debug("-> %s", message)
+                payload = json.dumps(attr.asdict(message))
+
             topic = message.topic(**topic_args)
-            payload = json.dumps(attr.asdict(message))
             _LOGGER.debug("Publishing %s char(s) to %s", len(payload), topic)
             self.client.publish(topic, payload)
         except Exception:
