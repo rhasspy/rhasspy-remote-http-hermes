@@ -17,6 +17,8 @@ from rhasspyhermes.asr import (
     AsrAudioCaptured,
     AsrTrain,
     AsrTrainSuccess,
+    AsrToggleOn,
+    AsrToggleOff,
 )
 from rhasspyhermes.audioserver import AudioFrame, AudioPlayBytes
 from rhasspyhermes.base import Message
@@ -30,6 +32,7 @@ from rhasspyhermes.nlu import (
     NluTrainSuccess,
 )
 from rhasspyhermes.tts import TtsSay, TtsSayFinished
+from rhasspyhermes.wake import HotwordDetected, HotwordToggleOn, HotwordToggleOff
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -64,6 +67,10 @@ class RemoteHermesMqtt:
         nlu_train_command: typing.Optional[typing.List[str]] = None,
         tts_url: typing.Optional[str] = None,
         tts_command: typing.Optional[typing.List[str]] = None,
+        wake_command: typing.Optional[typing.List[str]] = None,
+        wake_sample_rate: int = 16000,
+        wake_sample_width: int = 2,
+        wake_channels: int = 1,
         word_transform: typing.Optional[typing.Callable[[str], str]] = None,
         siteIds: typing.Optional[typing.List[str]] = None,
     ):
@@ -73,6 +80,7 @@ class RemoteHermesMqtt:
         self.asr_command = asr_command
         self.asr_train_url = asr_train_url
         self.asr_train_command = asr_train_command
+        self.asr_enabled = True
 
         self.nlu_url = nlu_url
         self.nlu_command = nlu_command
@@ -81,6 +89,13 @@ class RemoteHermesMqtt:
 
         self.tts_url = tts_url
         self.tts_command = tts_command
+
+        self.wake_command = wake_command
+        self.wake_enabled = True
+        self.wake_proc: typing.Optional[subprocess.Popen] = None
+        self.wake_sample_rate = wake_sample_rate
+        self.wake_sample_width = wake_sample_width
+        self.wake_channels = wake_channels
 
         self.word_transform = word_transform
         self.siteIds = siteIds or []
@@ -202,9 +217,7 @@ class RemoteHermesMqtt:
                 wav_bytes = response.content
                 if wav_bytes:
                     self.publish(
-                        AudioPlayBytes(wav_bytes),
-                        siteId=say.siteId,
-                        requestId=say.id,
+                        AudioPlayBytes(wav_bytes), siteId=say.siteId, requestId=say.id
                     )
                 else:
                     _LOGGER.error("Received empty response")
@@ -249,19 +262,50 @@ class RemoteHermesMqtt:
     def handle_audio_frame(self, wav_bytes: bytes, siteId: str = "default"):
         """Add audio frame to open sessions."""
         try:
-            # Add to all open sessions
-            with io.BytesIO(wav_bytes) as in_io:
-                with wave.open(in_io) as in_wav:
-                    for session in self.asr_sessions.values():
-                        if session.wav_file is None:
-                            session.wav_file = wave.open(session.wav_io, "wb")
-                            session.wav_file.setframerate(in_wav.getframerate())
-                            session.wav_file.setsampwidth(in_wav.getsampwidth())
-                            session.wav_file.setnchannels(in_wav.getnchannels())
+            if self.asr_enabled:
+                # Add to all open ASR sessions
+                # TODO: Convert WAV
+                with io.BytesIO(wav_bytes) as in_io:
+                    with wave.open(in_io) as in_wav:
+                        for session in self.asr_sessions.values():
+                            if session.wav_file is None:
+                                session.wav_file = wave.open(session.wav_io, "wb")
+                                session.wav_file.setframerate(in_wav.getframerate())
+                                session.wav_file.setsampwidth(in_wav.getsampwidth())
+                                session.wav_file.setnchannels(in_wav.getnchannels())
 
-                        session.wav_file.writeframes(
-                            in_wav.readframes(in_wav.getnframes())
-                        )
+                            session.wav_file.writeframes(
+                                in_wav.readframes(in_wav.getnframes())
+                            )
+
+            if self.wake_enabled and self.wake_proc:
+                # Convert and send to wake command
+                audio_bytes = self.maybe_convert_wav(
+                    wav_bytes,
+                    self.wake_sample_rate,
+                    self.wake_sample_width,
+                    self.wake_channels,
+                )
+                self.wake_proc.stdin.write(audio_bytes)
+                if self.wake_proc.poll():
+                    stdout, stderr = self.wake_proc.communicate()
+                    if stderr:
+                        _LOGGER.debug(stderr.decode())
+
+                    wakewordId = stdout.decode().strip()
+                    _LOGGER.debug("Detected wake word %s", wakewordId)
+                    self.publish(
+                        HotwordDetected(
+                            modeId=wakewordId,
+                            modelVersion="",
+                            modelType="personal",
+                            siteId=siteId,
+                        ),
+                        wakewordId=wakewordId,
+                    )
+
+                    # Restart wake process
+                    self.start_wake_command()
 
         except Exception:
             _LOGGER.exception("handle_audio_frame")
@@ -437,14 +481,57 @@ class RemoteHermesMqtt:
 
     # -------------------------------------------------------------------------
 
+    def start_wake_command(self):
+        """Run wake command."""
+        self.stop_wake_command()
+
+        try:
+            _LOGGER.debug(self.wake_command)
+            self.wake_proc = subprocess.Popen(
+                self.wake_command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except Exception:
+            _LOGGER.exception("start_wake_command")
+
+    def stop_wake_command(self):
+        """Terminate wake command."""
+        try:
+            if self.wake_proc:
+                self.wake_proc.terminate()
+                self.wake_proc.wait()
+                _LOGGER.debug("Wake command terminated.")
+
+            self.wake_proc = None
+        except Exception:
+            _LOGGER.exception("stop_wake_command")
+
+    # -------------------------------------------------------------------------
+
     def on_connect(self, client, userdata, flags, rc):
         """Connected to MQTT broker."""
         try:
+            if self.wake_command:
+                self.start_wake_command()
+
             topics = []
 
             # ASR
             if self.asr_url or self.asr_command:
-                topics.extend([AsrStartListening.topic(), AsrStopListening.topic()])
+                topics.extend(
+                    [
+                        AsrStartListening.topic(),
+                        AsrStopListening.topic(),
+                        AsrToggleOn.topic(),
+                        AsrToggleOff.topic(),
+                    ]
+                )
+
+            # Wake
+            if self.wake_command:
+                topics.extend([HotwordToggleOn.topic(), HotwordToggleOff.topic()])
 
             if self.siteIds:
                 # Specific site ids
@@ -540,6 +627,34 @@ class RemoteHermesMqtt:
                 if (not self.siteIds) or (siteId in self.siteIds):
                     json_payload = json.loads(msg.payload)
                     self.handle_nlu_train(NluTrain(**json_payload), siteId=siteId)
+            elif AsrToggleOn.is_topic(msg.topic):
+                json_payload = json.loads(msg.payload)
+                if not self._check_siteId(json_payload):
+                    return
+
+                self.asr_enabled = True
+                _LOGGER.debug("ASR enabled")
+            elif AsrToggleOff.is_topic(msg.topic):
+                json_payload = json.loads(msg.payload)
+                if not self._check_siteId(json_payload):
+                    return
+
+                self.asr_enabled = False
+                _LOGGER.debug("ASR disabled")
+            elif HotwordToggleOn.is_topic(msg.topic):
+                json_payload = json.loads(msg.payload)
+                if not self._check_siteId(json_payload):
+                    return
+
+                self.wake_enabled = True
+                _LOGGER.debug("Wake word detection enabled")
+            elif HotwordToggleOff.is_topic(msg.topic):
+                json_payload = json.loads(msg.payload)
+                if not self._check_siteId(json_payload):
+                    return
+
+                self.wake_enabled = False
+                _LOGGER.debug("Wake word detection disabled")
         except Exception:
             _LOGGER.exception("on_message")
 
@@ -571,3 +686,49 @@ class RemoteHermesMqtt:
 
         # All sites
         return True
+
+    def _convert_wav(
+        self, wav_bytes: bytes, sample_rate: int, sample_width: int, channels: int
+    ) -> bytes:
+        """Converts WAV data to required format with sox. Return raw audio."""
+        return subprocess.run(
+            [
+                "sox",
+                "-t",
+                "wav",
+                "-",
+                "-r",
+                str(sample_rate),
+                "-e",
+                "signed-integer",
+                "-b",
+                str(sample_width * 8),
+                "-c",
+                str(channels),
+                "-t",
+                "raw",
+                "-",
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            input=wav_bytes,
+        ).stdout
+
+    def maybe_convert_wav(
+        self, wav_bytes: bytes, sample_rate: int, sample_width: int, channels: int
+    ) -> bytes:
+        """Converts WAV data to required format if necessary. Returns raw audio."""
+        with io.BytesIO(wav_bytes) as wav_io:
+            with wave.open(wav_io, "rb") as wav_file:
+                if (
+                    (wav_file.getframerate() != sample_rate)
+                    or (wav_file.getsampwidth() != sample_width)
+                    or (wav_file.getnchannels() != channels)
+                ):
+                    # Return converted wav
+                    return self._convert_wav(
+                        wav_bytes, sample_rate, sample_width, channels
+                    )
+
+                # Return original audio
+                return wav_file.readframes(wav_file.getnframes())

@@ -50,6 +50,10 @@ def main():
         "--tts-command", help="Command to execute for TTS (text to WAV)"
     )
     parser.add_argument(
+        "--wake-command",
+        help="Command to execute for wake word detection (raw audio to wakewordId)",
+    )
+    parser.add_argument(
         "--casing",
         choices=["upper", "lower", "ignore"],
         default="ignore",
@@ -94,6 +98,9 @@ def main():
     if args.tts_command:
         args.tts_command = shlex.split(args.tts_command)
 
+    if args.wake_command:
+        args.wake_command = shlex.split(args.wake_command)
+
     try:
         # Listen for messages
         client = mqtt.Client()
@@ -109,6 +116,7 @@ def main():
             nlu_train_command=args.nlu_train_command,
             tts_url=args.tts_url,
             tts_command=args.tts_command,
+            wake_command=args.wake_command,
             word_transform=get_word_transform(args.casing),
             siteIds=args.siteId,
         )
@@ -129,7 +137,10 @@ def main():
         _LOGGER.debug("Connecting to %s:%s", args.host, args.port)
         client.connect(args.host, args.port)
 
-        client.loop_forever()
+        try:
+            client.loop_forever()
+        finally:
+            hermes.stop_wake_command()
     except KeyboardInterrupt:
         pass
     finally:
