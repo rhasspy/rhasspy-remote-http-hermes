@@ -2,6 +2,7 @@
 import argparse
 import logging
 import shlex
+import typing
 
 import paho.mqtt.client as mqtt
 
@@ -42,6 +43,12 @@ def main():
     #     "--handle-command",
     #     help="Command to execute for intent handling",
     # )
+    parser.add_argument(
+        "--casing",
+        choices=["upper", "lower", "ignore"],
+        default="ignore",
+        help="Case transformation for words (default: ignore)",
+    )
     parser.add_argument(
         "--host", default="localhost", help="MQTT host (default: localhost)"
     )
@@ -86,6 +93,7 @@ def main():
             nlu_command=args.nlu_command,
             tts_url=args.tts_url,
             tts_command=args.tts_command,
+            word_transform=get_word_transform(args.casing),
             siteIds=args.siteId,
         )
 
@@ -110,6 +118,20 @@ def main():
         pass
     finally:
         _LOGGER.debug("Shutting down")
+
+
+# -----------------------------------------------------------------------------
+
+
+def get_word_transform(name: str) -> typing.Optional[typing.Callable[[str], str]]:
+    """Gets a word transformation function by name."""
+    if name == "upper":
+        return str.upper
+
+    if name == "lower":
+        return str.lower
+
+    return None
 
 
 # -----------------------------------------------------------------------------

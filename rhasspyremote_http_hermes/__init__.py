@@ -51,6 +51,7 @@ class RemoteHermesMqtt:
         nlu_command: typing.Optional[typing.List[str]] = None,
         tts_url: typing.Optional[str] = None,
         tts_command: typing.Optional[typing.List[str]] = None,
+        word_transform: typing.Optional[typing.Callable[[str], str]] = None,
         siteIds: typing.Optional[typing.List[str]] = None,
     ):
         self.client = client
@@ -64,6 +65,7 @@ class RemoteHermesMqtt:
         self.tts_url = tts_url
         self.tts_command = tts_command
 
+        self.word_transform = word_transform
         self.siteIds = siteIds or []
 
         # sessionId -> AsrSession
@@ -78,10 +80,16 @@ class RemoteHermesMqtt:
         _LOGGER.debug("<- %s", query)
 
         try:
+            input_text = query.input
+
+            # Fix casing
+            if self.word_transform:
+                input_text = self.word_transform(input_text)
+
             if self.nlu_url:
                 # Use remote server
                 _LOGGER.debug(self.nlu_url)
-                response = requests.post(self.nlu_url, data=query.input)
+                response = requests.post(self.nlu_url, data=input_text)
                 response.raise_for_status()
                 intent_dict = response.json()
             elif self.nlu_command:
@@ -94,7 +102,7 @@ class RemoteHermesMqtt:
                     universal_newlines=True,
                 )
 
-                print(query.input, file=proc.stdin)
+                print(input_text, file=proc.stdin)
                 output, _ = proc.communicate()
 
                 intent_dict = json.loads(output)
@@ -192,9 +200,7 @@ class RemoteHermesMqtt:
                     _LOGGER.debug(proc.stderr.decode())
 
                 self.client.publish(
-                    AudioPlayBytes(proc.stdout),
-                    siteId=say.siteId,
-                    requestId=say.id,
+                    AudioPlayBytes(proc.stdout), siteId=say.siteId, requestId=say.id
                 )
 
         except Exception:
