@@ -194,18 +194,22 @@ class RemoteHermesMqtt:
                 response.raise_for_status()
 
                 content_type = response.headers["Content-Type"]
-                if content_type == "audio/wav":
+                if content_type != "audio/wav":
+                    _LOGGER.warning(
+                        "Expected audio/wav content type, got %s", content_type
+                    )
+
+                wav_bytes = response.content
+                if wav_bytes:
                     self.publish(
-                        AudioPlayBytes.topic(response.content),
+                        AudioPlayBytes(wav_bytes),
                         siteId=say.siteId,
                         requestId=say.id,
                     )
                 else:
-                    _LOGGER.warning(
-                        "Expected audio/wav content type, got %s", content_type
-                    )
+                    _LOGGER.error("Received empty response")
             elif self.tts_command:
-                _LOGGER(self.tts_command)
+                _LOGGER.debug(self.tts_command)
                 proc = subprocess.run(
                     self.tts_command,
                     input=say.text.encode(),
@@ -217,7 +221,7 @@ class RemoteHermesMqtt:
                 if proc.stderr:
                     _LOGGER.debug(proc.stderr.decode())
 
-                self.client.publish(
+                self.publish(
                     AudioPlayBytes(proc.stdout), siteId=say.siteId, requestId=say.id
                 )
 
