@@ -22,11 +22,25 @@ def main():
         "--asr-command", help="Command to execute for ASR (WAV to text)"
     )
     parser.add_argument(
+        "--asr-train-url",
+        help="URL for training speech to text server (POST with JSON)",
+    )
+    parser.add_argument(
+        "--asr-train-command", help="Command to train ASR system (JSON to stdin)"
+    )
+    parser.add_argument(
         "--nlu-url",
         help="URL of remote intent recognition server (e.g., http://localhost:12101/api/text-to-intent)",
     )
     parser.add_argument(
         "--nlu-command", help="Command to execute for NLU (text to intent)"
+    )
+    parser.add_argument(
+        "--nlu-train-url",
+        help="URL for training intent recognition server (POST with JSON)",
+    )
+    parser.add_argument(
+        "--nlu-train-command", help="Command to train NLU system (JSON to stdin)"
     )
     parser.add_argument(
         "--tts-url",
@@ -35,14 +49,6 @@ def main():
     parser.add_argument(
         "--tts-command", help="Command to execute for TTS (text to WAV)"
     )
-    # parser.add_argument(
-    #     "--handle-url",
-    #     help="URL of remote intent handling server (e.g., http://my-server:port/endpoint",
-    # )
-    # parser.add_argument(
-    #     "--handle-command",
-    #     help="Command to execute for intent handling",
-    # )
     parser.add_argument(
         "--casing",
         choices=["upper", "lower", "ignore"],
@@ -76,8 +82,14 @@ def main():
     if args.asr_command:
         args.asr_command = shlex.split(args.asr_command)
 
+    if args.asr_train_command:
+        args.asr_train_command = shlex.split(args.asr_train_command)
+
     if args.nlu_command:
         args.nlu_command = shlex.split(args.nlu_command)
+
+    if args.nlu_train_command:
+        args.nlu_train_command = shlex.split(args.nlu_train_command)
 
     if args.tts_command:
         args.tts_command = shlex.split(args.tts_command)
@@ -88,9 +100,13 @@ def main():
         hermes = RemoteHermesMqtt(
             client,
             asr_url=args.asr_url,
+            asr_train_url=args.asr_train_url,
             asr_command=args.asr_command,
+            asr_train_command=args.asr_train_command,
             nlu_url=args.nlu_url,
+            nlu_train_url=args.nlu_train_url,
             nlu_command=args.nlu_command,
+            nlu_train_command=args.nlu_train_command,
             tts_url=args.tts_url,
             tts_command=args.tts_command,
             word_transform=get_word_transform(args.casing),

@@ -15,11 +15,20 @@ from rhasspyhermes.asr import (
     AsrTextCaptured,
     AsrError,
     AsrAudioCaptured,
+    AsrTrain,
+    AsrTrainSuccess,
 )
 from rhasspyhermes.audioserver import AudioFrame, AudioPlayBytes
 from rhasspyhermes.base import Message
 from rhasspyhermes.intent import Intent, Slot, SlotRange
-from rhasspyhermes.nlu import NluError, NluIntent, NluIntentNotRecognized, NluQuery
+from rhasspyhermes.nlu import (
+    NluError,
+    NluIntent,
+    NluIntentNotRecognized,
+    NluQuery,
+    NluTrain,
+    NluTrainSuccess,
+)
 from rhasspyhermes.tts import TtsSay, TtsSayFinished
 
 _LOGGER = logging.getLogger(__name__)
@@ -47,8 +56,12 @@ class RemoteHermesMqtt:
         client,
         asr_url: typing.Optional[str] = None,
         asr_command: typing.Optional[typing.List[str]] = None,
+        asr_train_url: typing.Optional[str] = None,
+        asr_train_command: typing.Optional[typing.List[str]] = None,
         nlu_url: typing.Optional[str] = None,
         nlu_command: typing.Optional[typing.List[str]] = None,
+        nlu_train_url: typing.Optional[str] = None,
+        nlu_train_command: typing.Optional[typing.List[str]] = None,
         tts_url: typing.Optional[str] = None,
         tts_command: typing.Optional[typing.List[str]] = None,
         word_transform: typing.Optional[typing.Callable[[str], str]] = None,
@@ -58,9 +71,13 @@ class RemoteHermesMqtt:
 
         self.asr_url = asr_url
         self.asr_command = asr_command
+        self.asr_train_url = asr_train_url
+        self.asr_train_command = asr_train_command
 
         self.nlu_url = nlu_url
         self.nlu_command = nlu_command
+        self.nlu_train_url = nlu_train_url
+        self.nlu_train_command = nlu_train_command
 
         self.tts_url = tts_url
         self.tts_command = tts_command
@@ -179,8 +196,9 @@ class RemoteHermesMqtt:
                 content_type = response.headers["Content-Type"]
                 if content_type == "audio/wav":
                     self.publish(
-                        AudioPlayBytes.topic(siteId=say.siteId, requestId=say.id),
-                        response.content,
+                        AudioPlayBytes.topic(response.content),
+                        siteId=say.siteId,
+                        requestId=say.id,
                     )
                 else:
                     _LOGGER.warning(
@@ -331,27 +349,134 @@ class RemoteHermesMqtt:
 
     # -------------------------------------------------------------------------
 
+    def handle_asr_train(self, train: AsrTrain, siteId: str = "default"):
+        """Re-trains ASR system"""
+        _LOGGER.debug("<- %s(%s)", train.__class__.__name__, train.id)
+        try:
+            # Get JSON intent graph
+            json_graph = json.dumps(train.graph_dict)
+
+            if self.asr_train_url:
+                # Remote ASR server
+                response = requests.post(self.asr_train_url, json=json_graph)
+                response.raise_for_status()
+            elif self.asr_train_command:
+                # Local ASR training command
+                _LOGGER.debug(self.asr_train_command)
+
+                proc = subprocess.run(
+                    self.asr_train_command,
+                    input=json_graph,
+                    stderr=subprocess.PIPE,
+                    check=True,
+                )
+
+                if proc.stderr:
+                    _LOGGER.debug(proc.stderr.decode())
+            else:
+                _LOGGER.warning("Can't train ASR system. No train URL or command.")
+
+            # Report success
+            self.publish(AsrTrainSuccess(id=train.id))
+        except Exception as e:
+            _LOGGER.exception("handle_asr_train")
+            self.publish(
+                AsrError(
+                    error=str(e),
+                    context=f"url='{self.asr_train_url}', command='{self.asr_train_command}'",
+                    siteId=siteId,
+                    sessionId=train.id,
+                )
+            )
+
+    # -------------------------------------------------------------------------
+
+    def handle_nlu_train(self, train: NluTrain, siteId: str = "default"):
+        """Re-trains NLU system"""
+        _LOGGER.debug("<- %s(%s)", train.__class__.__name__, train.id)
+        try:
+            # Get JSON intent graph
+            json_graph = json.dumps(train.graph_dict)
+
+            if self.nlu_train_url:
+                # Remote NLU server
+                response = requests.post(self.nlu_train_url, json=json_graph)
+                response.raise_for_status()
+            elif self.nlu_train_command:
+                # Local NLU training command
+                _LOGGER.debug(self.nlu_train_command)
+
+                proc = subprocess.run(
+                    self.nlu_train_command,
+                    input=json_graph,
+                    stderr=subprocess.PIPE,
+                    check=True,
+                )
+
+                if proc.stderr:
+                    _LOGGER.debug(proc.stderr.decode())
+            else:
+                _LOGGER.warning("Can't train NLU system. No train URL or command.")
+
+            # Report success
+            self.publish(NluTrainSuccess(id=train.id))
+        except Exception as e:
+            _LOGGER.exception("handle_nlu_train")
+            self.publish(
+                NluError(
+                    error=str(e),
+                    context=f"url='{self.nlu_train_url}', command='{self.nlu_train_command}'",
+                    siteId=siteId,
+                    sessionId=train.id,
+                )
+            )
+
+    # -------------------------------------------------------------------------
+
     def on_connect(self, client, userdata, flags, rc):
         """Connected to MQTT broker."""
         try:
             topics = []
 
+            # ASR
             if self.asr_url or self.asr_command:
                 topics.extend([AsrStartListening.topic(), AsrStopListening.topic()])
 
-                # Subscribe to audio too
-                if self.siteIds:
-                    # Specific site ids
-                    topics.extend(
-                        AudioFrame.topic(siteId=siteId) for siteId in self.siteIds
-                    )
-                else:
-                    # All site ids
+            if self.siteIds:
+                # Specific site ids
+                for siteId in self.siteIds:
+                    # ASR audio
+                    if self.asr_url or self.asr_command:
+                        topics.append(AudioFrame.topic(siteId=siteId))
+
+                    # Training
+                    if self.asr_train_url or self.asr_train_command:
+                        topics.append(AsrTrain.topic(siteId=siteId))
+
+                    if self.nlu_train_url or self.nlu_train_command:
+                        topics.append(NluTrain.topic(siteId=siteId))
+            else:
+                # All site ids
+                if self.asr_url or self.asr_command:
+                    # ASR audio
                     topics.append(AudioFrame.topic(siteId="+"))
 
+                # Training
+                if self.asr_train_url or self.asr_train_command:
+                    topics.append(
+                        AudioFrame.topic(siteId="+"), AsrTrain.topic(siteId="+")
+                    )
+
+                if self.nlu_train_url or self.nlu_train_command:
+                    topics.append(
+                        AudioFrame.topic(siteId="+"), NluTrain.topic(siteId="+")
+                    )
+
+            # NLU
             if self.nlu_url or self.nlu_command:
                 topics.append(NluQuery.topic())
 
+            # TTS
             if self.tts_url or self.tts_command:
                 topics.append(TtsSay.topic())
 
@@ -401,6 +526,16 @@ class RemoteHermesMqtt:
                     return
 
                 self.handle_stop_listening(AsrStopListening(**json_payload))
+            elif AsrTrain.is_topic(msg.topic):
+                siteId = AsrTrain.get_siteId(msg.topic)
+                if (not self.siteIds) or (siteId in self.siteIds):
+                    json_payload = json.loads(msg.payload)
+                    self.handle_asr_train(AsrTrain(**json_payload), siteId=siteId)
+            elif NluTrain.is_topic(msg.topic):
+                siteId = NluTrain.get_siteId(msg.topic)
+                if (not self.siteIds) or (siteId in self.siteIds):
+                    json_payload = json.loads(msg.payload)
+                    self.handle_nlu_train(NluTrain(**json_payload), siteId=siteId)
         except Exception:
             _LOGGER.exception("on_message")
 
