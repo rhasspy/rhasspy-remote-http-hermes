@@ -6,22 +6,24 @@ import subprocess
 import time
 import typing
 import wave
+from uuid import uuid4
 
 import attr
 import requests
 from rhasspyhermes.asr import (
+    AsrAudioCaptured,
+    AsrError,
     AsrStartListening,
     AsrStopListening,
     AsrTextCaptured,
-    AsrError,
-    AsrAudioCaptured,
+    AsrToggleOff,
+    AsrToggleOn,
     AsrTrain,
     AsrTrainSuccess,
-    AsrToggleOn,
-    AsrToggleOff,
 )
 from rhasspyhermes.audioserver import AudioFrame, AudioPlayBytes
 from rhasspyhermes.base import Message
+from rhasspyhermes.handle import HandleToggleOff, HandleToggleOn
 from rhasspyhermes.intent import Intent, Slot, SlotRange
 from rhasspyhermes.nlu import (
     NluError,
@@ -32,7 +34,7 @@ from rhasspyhermes.nlu import (
     NluTrainSuccess,
 )
 from rhasspyhermes.tts import TtsSay, TtsSayFinished
-from rhasspyhermes.wake import HotwordDetected, HotwordToggleOn, HotwordToggleOff
+from rhasspyhermes.wake import HotwordDetected, HotwordToggleOff, HotwordToggleOn
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -71,31 +73,42 @@ class RemoteHermesMqtt:
         wake_sample_rate: int = 16000,
         wake_sample_width: int = 2,
         wake_channels: int = 1,
+        handle_url: typing.Optional[str] = None,
+        handle_command: typing.Optional[typing.List[str]] = None,
         word_transform: typing.Optional[typing.Callable[[str], str]] = None,
         siteIds: typing.Optional[typing.List[str]] = None,
     ):
         self.client = client
 
+        # Speech to text
         self.asr_url = asr_url
         self.asr_command = asr_command
         self.asr_train_url = asr_train_url
         self.asr_train_command = asr_train_command
         self.asr_enabled = True
 
+        # Intent recognition
         self.nlu_url = nlu_url
         self.nlu_command = nlu_command
         self.nlu_train_url = nlu_train_url
         self.nlu_train_command = nlu_train_command
 
+        # Text to speech
         self.tts_url = tts_url
         self.tts_command = tts_command
 
+        # Wake word detection
         self.wake_command = wake_command
         self.wake_enabled = True
         self.wake_proc: typing.Optional[subprocess.Popen] = None
         self.wake_sample_rate = wake_sample_rate
         self.wake_sample_width = wake_sample_width
         self.wake_channels = wake_channels
+
+        # Intent handling
+        self.handle_url = handle_url
+        self.handle_command = handle_command
+        self.handle_enabled = True
 
         self.word_transform = word_transform
         self.siteIds = siteIds or []
@@ -217,7 +230,9 @@ class RemoteHermesMqtt:
                 wav_bytes = response.content
                 if wav_bytes:
                     self.publish(
-                        AudioPlayBytes(wav_bytes), siteId=say.siteId, requestId=say.id
+                        AudioPlayBytes(wav_bytes=wav_bytes),
+                        siteId=say.siteId,
+                        requestId=say.id,
                     )
                 else:
                     _LOGGER.error("Received empty response")
@@ -235,7 +250,9 @@ class RemoteHermesMqtt:
                     _LOGGER.debug(proc.stderr.decode())
 
                 self.publish(
-                    AudioPlayBytes(proc.stdout), siteId=say.siteId, requestId=say.id
+                    AudioPlayBytes(wav_bytes=proc.stdout),
+                    siteId=say.siteId,
+                    requestId=say.id,
                 )
 
         except Exception:
@@ -264,7 +281,6 @@ class RemoteHermesMqtt:
         try:
             if self.asr_enabled:
                 # Add to all open ASR sessions
-                # TODO: Convert WAV
                 with io.BytesIO(wav_bytes) as in_io:
                     with wave.open(in_io) as in_wav:
                         for session in self.asr_sessions.values():
@@ -280,7 +296,7 @@ class RemoteHermesMqtt:
 
             if self.wake_enabled and self.wake_proc:
                 # Convert and send to wake command
-                audio_bytes = self.maybe_convert_wav(
+                audio_bytes = RemoteHermesMqtt.maybe_convert_wav(
                     wav_bytes,
                     self.wake_sample_rate,
                     self.wake_sample_width,
@@ -296,9 +312,10 @@ class RemoteHermesMqtt:
                     _LOGGER.debug("Detected wake word %s", wakewordId)
                     self.publish(
                         HotwordDetected(
-                            modeId=wakewordId,
+                            modelId=wakewordId,
                             modelVersion="",
                             modelType="personal",
+                            currentSensitivity=1.0,
                             siteId=siteId,
                         ),
                         wakewordId=wakewordId,
@@ -379,7 +396,7 @@ class RemoteHermesMqtt:
             if session.start_listening.sendAudioCaptured:
                 # Send audio data
                 self.publish(
-                    AsrAudioCaptured(wav_bytes),
+                    AsrAudioCaptured(wav_bytes=wav_bytes),
                     siteId=stop_listening.siteId,
                     sessionId=stop_listening.sessionId,
                 )
@@ -481,6 +498,59 @@ class RemoteHermesMqtt:
 
     # -------------------------------------------------------------------------
 
+    def handle_intent(self, intent: NluIntent):
+        """Handle intent with remote server or local command."""
+        try:
+            tts_text = ""
+            intent_dict = intent.to_rhasspy_dict()
+
+            if self.handle_url:
+                # Remote server
+                response = requests.post(self.handle_url, json=intent_dict)
+                response.raise_for_status()
+                response_dict = response.json()
+
+                # Check for speech response
+                tts_text = response_dict.get("speech", {}).get("text", "")
+            elif self.handle_command:
+                intent_json = json.dumps(intent_dict)
+
+                # Local handling command
+                _LOGGER.debug(self.handle_command)
+
+                proc = subprocess.run(
+                    self.handle_command,
+                    input=intent_json,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=True,
+                )
+
+                if proc.stderr:
+                    _LOGGER.debug(proc.stderr.decode())
+
+                response_dict = json.loads(proc.stdout.decode())
+
+                # Check for speech response
+                tts_text = response_dict.get("speech", {}).get("text", "")
+            else:
+                _LOGGER.warning("Can't handle intent. No handle URL or command.")
+
+            if tts_text:
+                # Forward to TTS system
+                self.publish(
+                    TtsSay(
+                        text=tts_text,
+                        id=str(uuid4()),
+                        siteId=intent.siteId,
+                        sessionId=intent.sessionId,
+                    )
+                )
+        except Exception:
+            _LOGGER.exception("handle_intent")
+
+    # -------------------------------------------------------------------------
+
     def start_wake_command(self):
         """Run wake command."""
         self.stop_wake_command()
@@ -571,6 +641,16 @@ class RemoteHermesMqtt:
             if self.tts_url or self.tts_command:
                 topics.append(TtsSay.topic())
 
+            # Intent Handling
+            if self.handle_url or self.handle_command:
+                topics.extend(
+                    [
+                        NluIntent.topic(intentName="#"),
+                        HandleToggleOn.topic(),
+                        HandleToggleOff.topic(),
+                    ]
+                )
+
             for topic in topics:
                 self.client.subscribe(topic)
                 _LOGGER.debug("Subscribed to %s", topic)
@@ -598,35 +678,45 @@ class RemoteHermesMqtt:
                 if not self._check_siteId(json_payload):
                     return
 
-                self.handle_query(NluQuery(**json_payload))
+                self.handle_query(NluQuery.from_dict(json_payload))
             elif msg.topic == TtsSay.topic():
                 json_payload = json.loads(msg.payload)
                 if not self._check_siteId(json_payload):
                     return
 
-                self.handle_say(TtsSay(**json_payload))
+                self.handle_say(TtsSay.from_dict(json_payload))
             elif msg.topic == AsrStartListening.topic():
                 json_payload = json.loads(msg.payload)
                 if not self._check_siteId(json_payload):
                     return
 
-                self.handle_start_listening(AsrStartListening(**json_payload))
+                self.handle_start_listening(AsrStartListening.from_dict(json_payload))
             elif msg.topic == AsrStopListening.topic():
                 json_payload = json.loads(msg.payload)
                 if not self._check_siteId(json_payload):
                     return
 
-                self.handle_stop_listening(AsrStopListening(**json_payload))
+                self.handle_stop_listening(AsrStopListening.from_dict(json_payload))
             elif AsrTrain.is_topic(msg.topic):
                 siteId = AsrTrain.get_siteId(msg.topic)
                 if (not self.siteIds) or (siteId in self.siteIds):
                     json_payload = json.loads(msg.payload)
-                    self.handle_asr_train(AsrTrain(**json_payload), siteId=siteId)
+                    self.handle_asr_train(
+                        AsrTrain.from_dict(json_payload), siteId=siteId
+                    )
             elif NluTrain.is_topic(msg.topic):
                 siteId = NluTrain.get_siteId(msg.topic)
                 if (not self.siteIds) or (siteId in self.siteIds):
                     json_payload = json.loads(msg.payload)
-                    self.handle_nlu_train(NluTrain(**json_payload), siteId=siteId)
+                    self.handle_nlu_train(
+                        NluTrain.from_dict(json_payload), siteId=siteId
+                    )
+            elif NluIntent.is_topic(msg.topic):
+                json_payload = json.loads(msg.payload)
+                if not self._check_siteId(json_payload):
+                    return
+
+                self.handle_intent(NluIntent.from_dict(json_payload))
             elif AsrToggleOn.is_topic(msg.topic):
                 json_payload = json.loads(msg.payload)
                 if not self._check_siteId(json_payload):
@@ -655,6 +745,20 @@ class RemoteHermesMqtt:
 
                 self.wake_enabled = False
                 _LOGGER.debug("Wake word detection disabled")
+            elif HandleToggleOn.is_topic(msg.topic):
+                json_payload = json.loads(msg.payload)
+                if not self._check_siteId(json_payload):
+                    return
+
+                self.handle_enabled = True
+                _LOGGER.debug("Intent handling enabled")
+            elif HandleToggleOff.is_topic(msg.topic):
+                json_payload = json.loads(msg.payload)
+                if not self._check_siteId(json_payload):
+                    return
+
+                self.wake_enabled = False
+                _LOGGER.debug("Intent handling disabled")
         except Exception:
             _LOGGER.exception("on_message")
 
@@ -670,7 +774,7 @@ class RemoteHermesMqtt:
                 payload = message.wav_bytes
             else:
                 _LOGGER.debug("-> %s", message)
-                payload = json.dumps(attr.asdict(message))
+                payload = json.dumps(attr.asdict(message)).encode()
 
             topic = message.topic(**topic_args)
             _LOGGER.debug("Publishing %s char(s) to %s", len(payload), topic)
@@ -687,8 +791,9 @@ class RemoteHermesMqtt:
         # All sites
         return True
 
-    def _convert_wav(
-        self, wav_bytes: bytes, sample_rate: int, sample_width: int, channels: int
+    @classmethod
+    def convert_wav(
+        cls, wav_bytes: bytes, sample_rate: int, sample_width: int, channels: int
     ) -> bytes:
         """Converts WAV data to required format with sox. Return raw audio."""
         return subprocess.run(
@@ -714,8 +819,9 @@ class RemoteHermesMqtt:
             input=wav_bytes,
         ).stdout
 
+    @classmethod
     def maybe_convert_wav(
-        self, wav_bytes: bytes, sample_rate: int, sample_width: int, channels: int
+        cls, wav_bytes: bytes, sample_rate: int, sample_width: int, channels: int
     ) -> bytes:
         """Converts WAV data to required format if necessary. Returns raw audio."""
         with io.BytesIO(wav_bytes) as wav_io:
@@ -726,7 +832,7 @@ class RemoteHermesMqtt:
                     or (wav_file.getnchannels() != channels)
                 ):
                     # Return converted wav
-                    return self._convert_wav(
+                    return RemoteHermesMqtt.convert_wav(
                         wav_bytes, sample_rate, sample_width, channels
                     )
 
