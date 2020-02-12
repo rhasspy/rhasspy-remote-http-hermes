@@ -54,6 +54,21 @@ def main():
         help="Command to execute for wake word detection (raw audio to wakewordId)",
     )
     parser.add_argument(
+        "--wake-sample-rate",
+        default=16000,
+        help="Sample rate in hertz required by wake command (default: 16000)",
+    )
+    parser.add_argument(
+        "--wake-sample-width",
+        default=2,
+        help="Sample width in bytes required by wake command (default: 2)",
+    )
+    parser.add_argument(
+        "--wake-channels",
+        default=1,
+        help="Number of channels required by wake command (default: 1)",
+    )
+    parser.add_argument(
         "--casing",
         choices=["upper", "lower", "ignore"],
         default="ignore",
@@ -117,6 +132,9 @@ def main():
             tts_url=args.tts_url,
             tts_command=args.tts_command,
             wake_command=args.wake_command,
+            wake_sample_rate=args.wake_sample_rate,
+            wake_sample_width=args.wake_sample_width,
+            wake_channels=args.wake_channels,
             word_transform=get_word_transform(args.casing),
             siteIds=args.siteId,
         )
