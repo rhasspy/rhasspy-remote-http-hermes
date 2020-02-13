@@ -68,6 +68,11 @@ def main():
         default=1,
         help="Number of channels required by wake command (default: 1)",
     )
+    parser.add_argument("--handle-url", help="URL of remote intent handling server")
+    parser.add_argument(
+        "--handle-command",
+        help="Command to execute for intent handling (JSON on stdin)",
+    )
     parser.add_argument(
         "--casing",
         choices=["upper", "lower", "ignore"],
@@ -135,6 +140,8 @@ def main():
             wake_sample_rate=args.wake_sample_rate,
             wake_sample_width=args.wake_sample_width,
             wake_channels=args.wake_channels,
+            handle_url=args.handle_url,
+            handle_command=args.handle_command,
             word_transform=get_word_transform(args.casing),
             siteIds=args.siteId,
         )
