@@ -1,5 +1,6 @@
 """Hermes MQTT service for remote Rhasspy server"""
 import argparse
+import asyncio
 import logging
 import shlex
 import typing
@@ -79,6 +80,8 @@ def main():
         default="ignore",
         help="Case transformation for words (default: ignore)",
     )
+    parser.add_argument("--certfile", help="SSL certificate file")
+    parser.add_argument("--keyfile", help="SSL private key file (optional)")
     parser.add_argument(
         "--host", default="localhost", help="MQTT host (default: localhost)"
     )
@@ -122,6 +125,8 @@ def main():
         args.wake_command = shlex.split(args.wake_command)
 
     try:
+        loop = asyncio.get_event_loop()
+
         # Listen for messages
         client = mqtt.Client()
         hermes = RemoteHermesMqtt(
@@ -143,7 +148,10 @@ def main():
             handle_url=args.handle_url,
             handle_command=args.handle_command,
             word_transform=get_word_transform(args.casing),
+            certfile=args.certfile,
+            keyfile=args.keyfile,
             siteIds=args.siteId,
+            loop=loop,
         )
 
         def on_disconnect(client, userdata, flags, rc):
@@ -161,9 +169,11 @@ def main():
 
         _LOGGER.debug("Connecting to %s:%s", args.host, args.port)
         client.connect(args.host, args.port)
+        client.loop_start()
 
         try:
-            client.loop_forever()
+            # Run event loop
+            loop.run_forever()
         finally:
             hermes.stop_wake_command()
     except KeyboardInterrupt:

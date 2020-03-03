@@ -1,15 +1,17 @@
 """Hermes MQTT server for Rhasspy remote server"""
+import asyncio
 import io
 import json
 import logging
+import ssl
 import subprocess
 import time
 import typing
 import wave
 from uuid import uuid4
 
+import aiohttp
 import attr
-import requests
 from rhasspyhermes.asr import (
     AsrAudioCaptured,
     AsrError,
@@ -21,7 +23,7 @@ from rhasspyhermes.asr import (
     AsrTrain,
     AsrTrainSuccess,
 )
-from rhasspyhermes.audioserver import AudioFrame, AudioPlayBytes
+from rhasspyhermes.audioserver import AudioFrame, AudioPlayBytes, AudioSessionFrame
 from rhasspyhermes.base import Message
 from rhasspyhermes.handle import HandleToggleOff, HandleToggleOn
 from rhasspyhermes.intent import Intent, Slot, SlotRange
@@ -29,16 +31,23 @@ from rhasspyhermes.nlu import (
     NluError,
     NluIntent,
     NluIntentNotRecognized,
+    NluIntentParsed,
     NluQuery,
     NluTrain,
     NluTrainSuccess,
 )
 from rhasspyhermes.tts import TtsSay, TtsSayFinished
 from rhasspyhermes.wake import HotwordDetected, HotwordToggleOff, HotwordToggleOn
+from rhasspysilence import VoiceCommandRecorder, VoiceCommandResult, WebRtcVadRecorder
 
 _LOGGER = logging.getLogger(__name__)
 
 # -----------------------------------------------------------------------------
+
+TopicArgs = typing.Mapping[str, typing.Any]
+GeneratorType = typing.AsyncIterable[
+    typing.Union[Message, typing.Tuple[Message, TopicArgs]]
+]
 
 
 @attr.s(auto_attribs=True, slots=True)
@@ -47,6 +56,7 @@ class AsrSession:
 
     start_listening: AsrStartListening
     wav_io: io.BytesIO
+    recorder: VoiceCommandRecorder
     wav_file: typing.Optional[wave.Wave_write] = None
 
 
@@ -76,7 +86,14 @@ class RemoteHermesMqtt:
         handle_url: typing.Optional[str] = None,
         handle_command: typing.Optional[typing.List[str]] = None,
         word_transform: typing.Optional[typing.Callable[[str], str]] = None,
+        certfile: typing.Optional[str] = None,
+        keyfile: typing.Optional[str] = None,
+        make_recorder: typing.Callable[[], VoiceCommandRecorder] = None,
+        recorder_sample_rate: int = 16000,
+        recorder_sample_width: int = 2,
+        recorder_channels: int = 1,
         siteIds: typing.Optional[typing.List[str]] = None,
+        loop=None,
     ):
         self.client = client
 
@@ -111,6 +128,26 @@ class RemoteHermesMqtt:
         self.handle_enabled = True
 
         self.word_transform = word_transform
+
+        # SSL
+        self.ssl_context = ssl.SSLContext()
+        if certfile:
+            _LOGGER.debug("Using SSL with certfile=%s, keyfile=%s", certfile, keyfile)
+            self.ssl_context.load_cert_chain(certfile, keyfile)
+
+        # Async HTTP
+        self.loop = loop or asyncio.get_event_loop()
+        self.http_session = aiohttp.ClientSession()
+
+        # No timeout
+        def default_recorder():
+            return WebRtcVadRecorder(max_seconds=None)
+
+        self.make_recorder = make_recorder or default_recorder
+        self.recorder_sample_rate = recorder_sample_rate
+        self.recorder_sample_width = recorder_sample_width
+        self.recorder_channels = recorder_channels
+
         self.siteIds = siteIds or []
 
         # sessionId -> AsrSession
@@ -120,7 +157,16 @@ class RemoteHermesMqtt:
 
     # -------------------------------------------------------------------------
 
-    def handle_query(self, query: NluQuery):
+    async def handle_query(
+        self, query: NluQuery
+    ) -> typing.AsyncIterable[
+        typing.Union[
+            typing.Tuple[NluIntent, TopicArgs],
+            NluIntentParsed,
+            NluIntentNotRecognized,
+            NluError,
+        ]
+    ]:
         """Do intent recognition."""
         _LOGGER.debug("<- %s", query)
 
@@ -134,21 +180,25 @@ class RemoteHermesMqtt:
             if self.nlu_url:
                 # Use remote server
                 _LOGGER.debug(self.nlu_url)
-                response = requests.post(self.nlu_url, data=input_text)
-                response.raise_for_status()
-                intent_dict = response.json()
+
+                async with self.http_session.post(
+                    self.nlu_url, data=input_text, ssl=self.ssl_context
+                ) as response:
+                    response.raise_for_status()
+                    intent_dict = await response.json()
             elif self.nlu_command:
                 # Run external command
                 _LOGGER.debug(self.nlu_command)
-                proc = subprocess.Popen(
-                    self.nlu_command,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    universal_newlines=True,
+                proc = await asyncio.create_subprocess_exec(
+                    *self.nlu_command,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
                 )
 
-                print(input_text, file=proc.stdin)
-                output, _ = proc.communicate()
+                input_bytes = (input_text.strip() + "\n").encode()
+                output, error = await proc.communicate(input_bytes)
+                if error:
+                    _LOGGER.debug(error.decode())
 
                 intent_dict = json.loads(output)
             else:
@@ -159,7 +209,36 @@ class RemoteHermesMqtt:
 
             if intent_name:
                 # Recognized
-                self.publish(
+                tokens = query.input.split()
+
+                yield NluIntentParsed(
+                    input=query.input,
+                    id=query.id,
+                    siteId=query.siteId,
+                    sessionId=query.sessionId,
+                    intent=Intent(
+                        intentName=intent_name,
+                        confidenceScore=intent_dict["intent"].get("confidence", 1.0),
+                    ),
+                    slots=[
+                        Slot(
+                            entity=e["entity"],
+                            slotName=e["entity"],
+                            confidence=1,
+                            value=e["value"],
+                            raw_value=e.get("raw_value", e["value"]),
+                            range=SlotRange(
+                                start=e.get("start", 0),
+                                end=e.get("end", 1),
+                                raw_start=e.get("raw_start"),
+                                raw_end=e.get("raw_end"),
+                            ),
+                        )
+                        for e in intent_dict.get("entities", [])
+                    ],
+                )
+
+                yield (
                     NluIntent(
                         input=query.input,
                         id=query.id,
@@ -179,86 +258,97 @@ class RemoteHermesMqtt:
                                 value=e["value"],
                                 raw_value=e.get("raw_value", e["value"]),
                                 range=SlotRange(
-                                    start=e.get("raw_start", e.get("start", 0)),
-                                    end=e.get("raw_end", e.get("end", 1)),
+                                    start=e.get("start", 0),
+                                    end=e.get("end", 1),
+                                    raw_start=e.get("raw_start"),
+                                    raw_end=e.get("raw_end"),
                                 ),
                             )
                             for e in intent_dict.get("entities", [])
                         ],
+                        asrTokens=tokens,
+                        rawAsrTokens=tokens,
                     ),
-                    intentName=intent_name,
+                    {"intentName": intent_name},
                 )
             else:
                 # Not recognized
-                self.publish(
-                    NluIntentNotRecognized(
-                        input=query.input,
-                        id=query.id,
-                        siteId=query.siteId,
-                        sessionId=query.sessionId,
-                    )
+                yield NluIntentNotRecognized(
+                    input=query.input,
+                    id=query.id,
+                    siteId=query.siteId,
+                    sessionId=query.sessionId,
                 )
         except Exception as e:
             _LOGGER.exception("handle_query")
-            self.publish(
-                NluError(error=repr(e), context=repr(query)),
+            yield NluError(
+                error=repr(e),
+                context=repr(query),
                 siteId=query.siteId,
                 sessionId=query.sessionId,
             )
 
     # -------------------------------------------------------------------------
 
-    def handle_say(self, say: TtsSay):
+    async def handle_say(
+        self, say: TtsSay
+    ) -> typing.AsyncIterable[
+        typing.Union[typing.Tuple[AudioPlayBytes, TopicArgs], TtsSayFinished]
+    ]:
         """Do text to speech."""
         _LOGGER.debug("<- %s", say)
 
         try:
             if self.tts_url:
-                post_args = {"data": say.text}
+                # Remote text to speech server
+                _LOGGER.debug(self.tts_url)
+
+                params = {}
                 if say.lang:
-                    post_args["language"] = say.lang
+                    params["language"] = say.lang
 
-                response = requests.post(self.tts_url, **post_args)
-                response.raise_for_status()
+                async with self.http_session.post(
+                    self.tts_url, data=say.text, params=params, ssl=self.ssl_context
+                ) as response:
+                    response.raise_for_status()
+                    content_type = response.headers["Content-Type"]
+                    if content_type != "audio/wav":
+                        _LOGGER.warning(
+                            "Expected audio/wav content type, got %s", content_type
+                        )
 
-                content_type = response.headers["Content-Type"]
-                if content_type != "audio/wav":
-                    _LOGGER.warning(
-                        "Expected audio/wav content type, got %s", content_type
-                    )
-
-                wav_bytes = response.content
-                if wav_bytes:
-                    self.publish(
-                        AudioPlayBytes(wav_bytes=wav_bytes),
-                        siteId=say.siteId,
-                        requestId=say.id,
-                    )
-                else:
-                    _LOGGER.error("Received empty response")
+                    wav_bytes = await response.read()
+                    if wav_bytes:
+                        yield (
+                            AudioPlayBytes(wav_bytes=wav_bytes),
+                            {"siteId": say.siteId, "requestId": say.id},
+                        )
+                    else:
+                        _LOGGER.error("Received empty response")
             elif self.tts_command:
+                # Local text to speech process
                 _LOGGER.debug(self.tts_command)
-                proc = subprocess.run(
-                    self.tts_command,
-                    input=say.text.encode(),
-                    check=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+
+                proc = await asyncio.create_subprocess_exec(
+                    *self.tts_command,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
                 )
 
-                if proc.stderr:
-                    _LOGGER.debug(proc.stderr.decode())
+                output, error = await proc.communicate()
 
-                self.publish(
-                    AudioPlayBytes(wav_bytes=proc.stdout),
-                    siteId=say.siteId,
-                    requestId=say.id,
+                if error:
+                    _LOGGER.debug(error.decode())
+
+                yield (
+                    AudioPlayBytes(wav_bytes=output),
+                    {"siteId": say.siteId, "requestId": say.id},
                 )
 
         except Exception:
             _LOGGER.exception("handle_say")
         finally:
-            self.publish(TtsSayFinished(id=say.id, sessionId=say.sessionId))
+            yield TtsSayFinished(id=say.id, sessionId=say.sessionId)
 
     # -------------------------------------------------------------------------
 
@@ -268,22 +358,46 @@ class RemoteHermesMqtt:
 
         try:
             wav_io = io.BytesIO()
-            self.asr_sessions[start_listening.sessionId] = AsrSession(
-                start_listening=start_listening, wav_io=wav_io
+            session = AsrSession(
+                start_listening=start_listening,
+                wav_io=wav_io,
+                recorder=self.make_recorder(),
             )
+
+            self.asr_sessions[start_listening.sessionId] = session
+            session.recorder.start()
         except Exception:
             _LOGGER.exception("handle_start_listening")
 
     # -------------------------------------------------------------------------
 
-    def handle_audio_frame(self, wav_bytes: bytes, siteId: str = "default"):
+    async def handle_audio_frame(
+        self,
+        wav_bytes: bytes,
+        siteId: str = "default",
+        sessionId: typing.Optional[str] = None,
+    ) -> typing.AsyncIterable[
+        typing.Union[
+            typing.Tuple[HotwordDetected, TopicArgs],
+            AsrTextCaptured,
+            typing.Tuple[AsrAudioCaptured, TopicArgs],
+            AsrError,
+        ]
+    ]:
         """Add audio frame to open sessions."""
         try:
             if self.asr_enabled:
+                if sessionId is None:
+                    # Add to every open session
+                    target_sessions = list(self.asr_sessions.items())
+                else:
+                    # Add to single session
+                    target_sessions = [(sessionId, self.asr_sessions[sessionId])]
+
                 # Add to all open ASR sessions
                 with io.BytesIO(wav_bytes) as in_io:
                     with wave.open(in_io) as in_wav:
-                        for session in self.asr_sessions.values():
+                        for target_id, session in target_sessions:
                             if session.wav_file is None:
                                 session.wav_file = wave.open(session.wav_io, "wb")
                                 session.wav_file.setframerate(in_wav.getframerate())
@@ -294,7 +408,28 @@ class RemoteHermesMqtt:
                                 in_wav.readframes(in_wav.getnframes())
                             )
 
-            if self.wake_enabled and self.wake_proc:
+                            if session.start_listening.stopOnSilence:
+                                # Detect silence (end of command)
+                                audio_data = RemoteHermesMqtt.maybe_convert_wav(
+                                    wav_bytes,
+                                    self.recorder_sample_rate,
+                                    self.recorder_sample_width,
+                                    self.recorder_channels,
+                                )
+                                command = session.recorder.process_chunk(audio_data)
+                                if command and (
+                                    command.result == VoiceCommandResult.SUCCESS
+                                ):
+                                    # Complete session
+                                    stop_listening = AsrStopListening(
+                                        siteId=siteId, sessionId=target_id
+                                    )
+                                    async for message in self.handle_stop_listening(
+                                        stop_listening
+                                    ):
+                                        yield message
+
+            if self.wake_enabled and (sessionId is None) and self.wake_proc:
                 # Convert and send to wake command
                 audio_bytes = RemoteHermesMqtt.maybe_convert_wav(
                     wav_bytes,
@@ -310,7 +445,7 @@ class RemoteHermesMqtt:
 
                     wakewordId = stdout.decode().strip()
                     _LOGGER.debug("Detected wake word %s", wakewordId)
-                    self.publish(
+                    yield (
                         HotwordDetected(
                             modelId=wakewordId,
                             modelVersion="",
@@ -318,7 +453,7 @@ class RemoteHermesMqtt:
                             currentSensitivity=1.0,
                             siteId=siteId,
                         ),
-                        wakewordId=wakewordId,
+                        {"wakewordId": wakewordId},
                     )
 
                     # Restart wake process
@@ -329,46 +464,60 @@ class RemoteHermesMqtt:
 
     # -------------------------------------------------------------------------
 
-    def handle_stop_listening(self, stop_listening: AsrStopListening):
+    async def handle_stop_listening(
+        self, stop_listening: AsrStopListening
+    ) -> typing.AsyncIterable[
+        typing.Union[
+            AsrTextCaptured, typing.Tuple[AsrAudioCaptured, TopicArgs], AsrError
+        ]
+    ]:
         """Stop ASR session."""
         _LOGGER.debug("<- %s", stop_listening)
 
         try:
-            session = self.asr_sessions.pop(stop_listening.sessionId)
+            session = self.asr_sessions.pop(stop_listening.sessionId, None)
+            if session is None:
+                _LOGGER.warning("Session not found for %s", stop_listening.sessionId)
+                return
+
             assert session.wav_file
             session.wav_file.close()
+            session.recorder.stop()
 
             # Process entire WAV file
             assert session.wav_io
             wav_bytes = session.wav_io.getvalue()
 
             if self.asr_url:
+                _LOGGER.debug(self.asr_url)
+
                 # Remote ASR server
-                response = requests.post(
+                async with self.http_session.post(
                     self.asr_url,
                     data=wav_bytes,
                     headers={"Content-Type": "audio/wav", "Accept": "application/json"},
-                )
-                response.raise_for_status()
-
-                transcription_dict = response.json()
+                    ssl=self.ssl_context,
+                ) as response:
+                    response.raise_for_status()
+                    transcription_dict = await response.json()
             elif self.asr_command:
                 # Local ASR command
                 _LOGGER.debug(self.asr_command)
 
                 start_time = time.perf_counter()
-                proc = subprocess.run(
-                    self.asr_command,
-                    input=wav_bytes,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    check=True,
+                proc = await asyncio.create_subprocess_exec(
+                    *self.asr_command,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
                 )
 
-                if proc.stderr:
-                    _LOGGER.debug(proc.stderr.decode())
+                output, error = await proc.communicate(wav_bytes)
 
-                text = proc.stdout.decode()
+                if error:
+                    _LOGGER.debug(error.decode())
+
+                text = output.decode()
                 end_time = time.perf_counter()
 
                 transcription_dict = {
@@ -383,38 +532,38 @@ class RemoteHermesMqtt:
                 transcription_dict = {}
 
             # Publish transcription
-            self.publish(
-                AsrTextCaptured(
-                    text=transcription_dict.get("text", ""),
-                    likelihood=float(transcription_dict.get("likelihood", 0)),
-                    seconds=float(transcription_dict.get("transcribe_seconds", 0)),
-                    siteId=stop_listening.siteId,
-                    sessionId=stop_listening.sessionId,
-                )
+            yield AsrTextCaptured(
+                text=transcription_dict.get("text", ""),
+                likelihood=float(transcription_dict.get("likelihood", 0)),
+                seconds=float(transcription_dict.get("transcribe_seconds", 0)),
+                siteId=stop_listening.siteId,
+                sessionId=stop_listening.sessionId,
             )
 
             if session.start_listening.sendAudioCaptured:
                 # Send audio data
-                self.publish(
+                yield (
                     AsrAudioCaptured(wav_bytes=wav_bytes),
-                    siteId=stop_listening.siteId,
-                    sessionId=stop_listening.sessionId,
+                    {
+                        "siteId": stop_listening.siteId,
+                        "sessionId": stop_listening.sessionId,
+                    },
                 )
 
         except Exception as e:
             _LOGGER.exception("handle_stop_listening")
-            self.publish(
-                AsrError(
-                    error=str(e),
-                    context=f"url='{self.asr_url}', command='{self.asr_command}'",
-                    siteId=stop_listening.siteId,
-                    sessionId=stop_listening.sessionId,
-                )
+            yield AsrError(
+                error=str(e),
+                context=f"url='{self.asr_url}', command='{self.asr_command}'",
+                siteId=stop_listening.siteId,
+                sessionId=stop_listening.sessionId,
             )
 
     # -------------------------------------------------------------------------
 
-    def handle_asr_train(self, train: AsrTrain, siteId: str = "default"):
+    async def handle_asr_train(
+        self, train: AsrTrain, siteId: str = "default"
+    ) -> typing.AsyncIterable[typing.Union[AsrTrainSuccess, AsrError]]:
         """Re-trains ASR system"""
         _LOGGER.debug("<- %s(%s)", train.__class__.__name__, train.id)
         try:
@@ -423,40 +572,49 @@ class RemoteHermesMqtt:
 
             if self.asr_train_url:
                 # Remote ASR server
-                response = requests.post(self.asr_train_url, json=json_graph)
-                response.raise_for_status()
+                _LOGGER.debug(self.asr_train_url)
+
+                async with self.http_session.post(
+                    self.asr_train_url, json=json_graph, ssl=self.ssl_context
+                ) as response:
+                    # No data expected back
+                    response.raise_for_status()
             elif self.asr_train_command:
                 # Local ASR training command
                 _LOGGER.debug(self.asr_train_command)
 
-                proc = subprocess.run(
-                    self.asr_train_command,
-                    input=json_graph,
-                    stderr=subprocess.PIPE,
-                    check=True,
+                proc = await asyncio.create_subprocess_exec(
+                    *self.asr_train_command,
+                    stdin=asyncio.subprocess.PIPE,
+                    sterr=asyncio.subprocess.PIPE,
                 )
 
-                if proc.stderr:
-                    _LOGGER.debug(proc.stderr.decode())
+                output, error = await proc.communicate(json_graph.encode())
+
+                if output:
+                    _LOGGER.debug(output.decode())
+
+                if error:
+                    _LOGGER.debug(error.decode())
             else:
                 _LOGGER.warning("Can't train ASR system. No train URL or command.")
 
             # Report success
-            self.publish(AsrTrainSuccess(id=train.id))
+            yield AsrTrainSuccess(id=train.id)
         except Exception as e:
             _LOGGER.exception("handle_asr_train")
-            self.publish(
-                AsrError(
-                    error=str(e),
-                    context=f"url='{self.asr_train_url}', command='{self.asr_train_command}'",
-                    siteId=siteId,
-                    sessionId=train.id,
-                )
+            yield AsrError(
+                error=str(e),
+                context=f"url='{self.asr_train_url}', command='{self.asr_train_command}'",
+                siteId=siteId,
+                sessionId=train.id,
             )
 
     # -------------------------------------------------------------------------
 
-    def handle_nlu_train(self, train: NluTrain, siteId: str = "default"):
+    async def handle_nlu_train(
+        self, train: NluTrain, siteId: str = "default"
+    ) -> typing.AsyncIterable[typing.Union[NluTrainSuccess, NluError]]:
         """Re-trains NLU system"""
         _LOGGER.debug("<- %s(%s)", train.__class__.__name__, train.id)
         try:
@@ -465,40 +623,49 @@ class RemoteHermesMqtt:
 
             if self.nlu_train_url:
                 # Remote NLU server
-                response = requests.post(self.nlu_train_url, json=json_graph)
-                response.raise_for_status()
+                _LOGGER.debug(self.nlu_train_url)
+
+                async with self.http_session.post(
+                    self.nlu_train_url, json=json_graph, ssl=self.ssl_context
+                ) as response:
+                    # No data expected in response
+                    response.raise_for_status()
             elif self.nlu_train_command:
                 # Local NLU training command
                 _LOGGER.debug(self.nlu_train_command)
 
-                proc = subprocess.run(
-                    self.nlu_train_command,
-                    input=json_graph,
-                    stderr=subprocess.PIPE,
-                    check=True,
+                proc = await asyncio.create_subprocess_exec(
+                    *self.nlu_train_command,
+                    stdin=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
                 )
 
-                if proc.stderr:
-                    _LOGGER.debug(proc.stderr.decode())
+                output, error = await proc.communicate(json_graph.encode())
+
+                if output:
+                    _LOGGER.debug(output.decode())
+
+                if error:
+                    _LOGGER.debug(error.decode())
             else:
                 _LOGGER.warning("Can't train NLU system. No train URL or command.")
 
             # Report success
-            self.publish(NluTrainSuccess(id=train.id))
+            yield NluTrainSuccess(id=train.id)
         except Exception as e:
             _LOGGER.exception("handle_nlu_train")
-            self.publish(
-                NluError(
-                    error=str(e),
-                    context=f"url='{self.nlu_train_url}', command='{self.nlu_train_command}'",
-                    siteId=siteId,
-                    sessionId=train.id,
-                )
+            yield NluError(
+                error=str(e),
+                context=f"url='{self.nlu_train_url}', command='{self.nlu_train_command}'",
+                siteId=siteId,
+                sessionId=train.id,
             )
 
     # -------------------------------------------------------------------------
 
-    def handle_intent(self, intent: NluIntent):
+    async def handle_intent(
+        self, intent: NluIntent
+    ) -> typing.AsyncIterable[typing.Union[TtsSay]]:
         """Handle intent with remote server or local command."""
         try:
             tts_text = ""
@@ -506,9 +673,13 @@ class RemoteHermesMqtt:
 
             if self.handle_url:
                 # Remote server
-                response = requests.post(self.handle_url, json=intent_dict)
-                response.raise_for_status()
-                response_dict = response.json()
+                _LOGGER.debug(self.handle_url)
+
+                async with self.http_session.post(
+                    self.handle_url, json=intent_dict, ssl=self.ssl_context
+                ) as response:
+                    response.raise_for_status()
+                    response_dict = await response.json()
 
                 # Check for speech response
                 tts_text = response_dict.get("speech", {}).get("text", "")
@@ -518,18 +689,19 @@ class RemoteHermesMqtt:
                 # Local handling command
                 _LOGGER.debug(self.handle_command)
 
-                proc = subprocess.run(
-                    self.handle_command,
-                    input=intent_json,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    check=True,
+                proc = await asyncio.create_subprocess_exec(
+                    *self.handle_command,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
                 )
 
-                if proc.stderr:
-                    _LOGGER.debug(proc.stderr.decode())
+                output, error = await proc.communicate(intent_json.encode())
 
-                response_dict = json.loads(proc.stdout.decode())
+                if error:
+                    _LOGGER.debug(error.decode())
+
+                response_dict = json.loads(output)
 
                 # Check for speech response
                 tts_text = response_dict.get("speech", {}).get("text", "")
@@ -538,13 +710,11 @@ class RemoteHermesMqtt:
 
             if tts_text:
                 # Forward to TTS system
-                self.publish(
-                    TtsSay(
-                        text=tts_text,
-                        id=str(uuid4()),
-                        siteId=intent.siteId,
-                        sessionId=intent.sessionId,
-                    )
+                yield TtsSay(
+                    text=tts_text,
+                    id=str(uuid4()),
+                    siteId=intent.siteId,
+                    sessionId=intent.sessionId,
                 )
         except Exception:
             _LOGGER.exception("handle_intent")
@@ -609,6 +779,9 @@ class RemoteHermesMqtt:
                     # ASR audio
                     if self.asr_url or self.asr_command:
                         topics.append(AudioFrame.topic(siteId=siteId))
+                        topics.append(
+                            AudioSessionFrame.topic(siteId=siteId, sessionId="+")
+                        )
 
                     # Training
                     if self.asr_train_url or self.asr_train_command:
@@ -621,17 +794,14 @@ class RemoteHermesMqtt:
                 if self.asr_url or self.asr_command:
                     # ASR audio
                     topics.append(AudioFrame.topic(siteId="+"))
+                    topics.append(AudioSessionFrame.topic(siteId="+", sessionId="+"))
 
                 # Training
                 if self.asr_train_url or self.asr_train_command:
-                    topics.append(
-                        AudioFrame.topic(siteId="+"), AsrTrain.topic(siteId="+")
-                    )
+                    topics.append(AsrTrain.topic(siteId="+"))
 
                 if self.nlu_train_url or self.nlu_train_command:
-                    topics.append(
-                        AudioFrame.topic(siteId="+"), NluTrain.topic(siteId="+")
-                    )
+                    topics.append(NluTrain.topic(siteId="+"))
 
             # NLU
             if self.nlu_url or self.nlu_command:
@@ -660,9 +830,6 @@ class RemoteHermesMqtt:
     def on_message(self, client, userdata, msg):
         """Received message from MQTT broker."""
         try:
-            if not msg.topic.endswith("/audioFrame"):
-                _LOGGER.debug("Received %s byte(s) on %s", len(msg.payload), msg.topic)
-
             if AudioFrame.is_topic(msg.topic):
                 # Check siteId
                 siteId = AudioFrame.get_siteId(msg.topic)
@@ -672,51 +839,79 @@ class RemoteHermesMqtt:
                         _LOGGER.debug("Receiving audio")
                         self.first_audio = False
 
-                    self.handle_audio_frame(msg.payload, siteId=siteId)
+                    # Run outside event loop
+                    self.publish_all(
+                        self.handle_audio_frame(msg.payload, siteId=siteId)
+                    )
+            elif AudioSessionFrame.is_topic(msg.topic):
+                # Check siteId
+                siteId = AudioSessionFrame.get_siteId(msg.topic)
+                sessionId = AudioSessionFrame.get_sessionId(msg.topic)
+                if ((not self.siteIds) or (siteId in self.siteIds)) and (
+                    sessionId in self.asr_sessions
+                ):
+                    # Add to active session
+                    if self.first_audio:
+                        _LOGGER.debug("Receiving audio")
+                        self.first_audio = False
+
+                    # Run outside event loop
+                    self.publish_all(
+                        self.handle_audio_frame(
+                            msg.payload, siteId=siteId, sessionId=sessionId
+                        )
+                    )
             elif msg.topic == NluQuery.topic():
                 json_payload = json.loads(msg.payload)
                 if not self._check_siteId(json_payload):
                     return
 
-                self.handle_query(NluQuery.from_dict(json_payload))
+                self.publish_all(self.handle_query(NluQuery.from_dict(json_payload)))
             elif msg.topic == TtsSay.topic():
                 json_payload = json.loads(msg.payload)
                 if not self._check_siteId(json_payload):
                     return
 
-                self.handle_say(TtsSay.from_dict(json_payload))
+                self.publish_all(self.handle_say(TtsSay.from_dict(json_payload)))
             elif msg.topic == AsrStartListening.topic():
                 json_payload = json.loads(msg.payload)
                 if not self._check_siteId(json_payload):
                     return
 
+                # Run outside event loop
                 self.handle_start_listening(AsrStartListening.from_dict(json_payload))
             elif msg.topic == AsrStopListening.topic():
                 json_payload = json.loads(msg.payload)
                 if not self._check_siteId(json_payload):
                     return
 
-                self.handle_stop_listening(AsrStopListening.from_dict(json_payload))
+                self.publish_all(
+                    self.handle_stop_listening(AsrStopListening.from_dict(json_payload))
+                )
             elif AsrTrain.is_topic(msg.topic):
                 siteId = AsrTrain.get_siteId(msg.topic)
                 if (not self.siteIds) or (siteId in self.siteIds):
                     json_payload = json.loads(msg.payload)
-                    self.handle_asr_train(
-                        AsrTrain.from_dict(json_payload), siteId=siteId
+                    self.publish_all(
+                        self.handle_asr_train(
+                            AsrTrain.from_dict(json_payload), siteId=siteId
+                        )
                     )
             elif NluTrain.is_topic(msg.topic):
                 siteId = NluTrain.get_siteId(msg.topic)
                 if (not self.siteIds) or (siteId in self.siteIds):
                     json_payload = json.loads(msg.payload)
-                    self.handle_nlu_train(
-                        NluTrain.from_dict(json_payload), siteId=siteId
+                    self.publish_all(
+                        self.handle_nlu_train(
+                            NluTrain.from_dict(json_payload), siteId=siteId
+                        )
                     )
             elif NluIntent.is_topic(msg.topic):
                 json_payload = json.loads(msg.payload)
                 if not self._check_siteId(json_payload):
                     return
 
-                self.handle_intent(NluIntent.from_dict(json_payload))
+                self.publish_all(self.handle_intent(NluIntent.from_dict(json_payload)))
             elif AsrToggleOn.is_topic(msg.topic):
                 json_payload = json.loads(msg.payload)
                 if not self._check_siteId(json_payload):
@@ -780,7 +975,22 @@ class RemoteHermesMqtt:
             _LOGGER.debug("Publishing %s char(s) to %s", len(payload), topic)
             self.client.publish(topic, payload)
         except Exception:
-            _LOGGER.exception("on_message")
+            _LOGGER.exception("publish")
+
+    def publish_all(self, async_generator: GeneratorType):
+        """Publish all messages from an async generator"""
+        asyncio.run_coroutine_threadsafe(
+            self.async_publish_all(async_generator), self.loop
+        )
+
+    async def async_publish_all(self, async_generator: GeneratorType):
+        """Enumerate all messages in an async generator publish them"""
+        async for maybe_message in async_generator:
+            if isinstance(maybe_message, Message):
+                self.publish(maybe_message)
+            else:
+                message, kwargs = maybe_message
+                self.publish(message, **kwargs)
 
     # -------------------------------------------------------------------------
 
