@@ -668,6 +668,10 @@ class RemoteHermesMqtt:
     ) -> typing.AsyncIterable[typing.Union[TtsSay]]:
         """Handle intent with remote server or local command."""
         try:
+            if not self.handle_enabled:
+                _LOGGER.debug("Intent handling is disabled")
+                return
+
             tts_text = ""
             intent_dict = intent.to_rhasspy_dict()
 
@@ -952,7 +956,7 @@ class RemoteHermesMqtt:
                 if not self._check_siteId(json_payload):
                     return
 
-                self.wake_enabled = False
+                self.handle_enabled = False
                 _LOGGER.debug("Intent handling disabled")
         except Exception:
             _LOGGER.exception("on_message")
