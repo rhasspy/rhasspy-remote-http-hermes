@@ -675,6 +675,9 @@ class RemoteHermesMqtt:
             tts_text = ""
             intent_dict = intent.to_rhasspy_dict()
 
+            # Add siteId
+            intent_dict["siteId"] = intent.siteId
+
             if self.handle_url:
                 # Remote server
                 _LOGGER.debug(self.handle_url)
