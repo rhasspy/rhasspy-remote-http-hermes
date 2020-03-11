@@ -406,31 +406,20 @@ class RemoteHermesMqtt:
                     # Add to single session
                     target_sessions = [(sessionId, self.asr_sessions[sessionId])]
 
+                with io.BytesIO(wav_bytes) as in_io:
+                    with wave.open(in_io) as in_wav:
+                        # Get WAV details from first frame
+                        sample_rate = in_wav.getframerate()
+                        sample_width = in_wav.getsampwidth()
+                        channels = in_wav.getnchannels()
+                        audio_data = in_wav.readframes(in_wav.getnframes())
+
                 # Add to target ASR sessions
                 for target_id, session in target_sessions:
-                    if (
-                        (session.sample_rate is None)
-                        or (session.sample_width is None)
-                        or (session.channels is None)
-                    ):
-                        with io.BytesIO(wav_bytes) as in_io:
-                            with wave.open(in_io) as in_wav:
-                                # Get WAV details from first frame
-                                session.sample_rate = in_wav.getframerate()
-                                session.sample_width = in_wav.getsampwidth()
-                                session.channels = in_wav.getnchannels()
-
-                    assert session.sample_rate is not None, "No sample rate"
-                    assert session.sample_width is not None, "No sample width"
-                    assert session.channels is not None, "No channels"
-
-                    # Ensure correct format
-                    session.audio_data += RemoteHermesMqtt.maybe_convert_wav(
-                        wav_bytes,
-                        session.sample_rate,
-                        session.sample_width,
-                        session.channels,
-                    )
+                    session.sample_rate = sample_rate
+                    session.sample_width = sample_width
+                    session.channels = channels
+                    session.audio_data += audio_data
 
                     if session.start_listening.stopOnSilence:
                         # Detect silence (end of command)
