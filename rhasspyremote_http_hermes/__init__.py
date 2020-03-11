@@ -56,9 +56,11 @@ class AsrSession:
     """WAV buffer for an ASR session"""
 
     start_listening: AsrStartListening
-    wav_io: io.BytesIO
     recorder: VoiceCommandRecorder
-    wav_file: typing.Optional[wave.Wave_write] = None
+    sample_rate: typing.Optional[int] = None
+    sample_width: typing.Optional[int] = None
+    channels: typing.Optional[int] = None
+    audio_data: bytes = bytes()
 
 
 # -----------------------------------------------------------------------------
@@ -370,11 +372,8 @@ class RemoteHermesMqtt:
         _LOGGER.debug("<- %s", start_listening)
 
         try:
-            wav_io = io.BytesIO()
             session = AsrSession(
-                start_listening=start_listening,
-                wav_io=wav_io,
-                recorder=self.make_recorder(),
+                start_listening=start_listening, recorder=self.make_recorder()
             )
 
             self.asr_sessions[start_listening.sessionId] = session
@@ -407,40 +406,50 @@ class RemoteHermesMqtt:
                     # Add to single session
                     target_sessions = [(sessionId, self.asr_sessions[sessionId])]
 
-                # Add to all open ASR sessions
-                with io.BytesIO(wav_bytes) as in_io:
-                    with wave.open(in_io) as in_wav:
-                        for target_id, session in target_sessions:
-                            if session.wav_file is None:
-                                session.wav_file = wave.open(session.wav_io, "wb")
-                                session.wav_file.setframerate(in_wav.getframerate())
-                                session.wav_file.setsampwidth(in_wav.getsampwidth())
-                                session.wav_file.setnchannels(in_wav.getnchannels())
+                # Add to target ASR sessions
+                for target_id, session in target_sessions:
+                    if (
+                        (session.sample_rate is None)
+                        or (session.sample_width is None)
+                        or (session.channels is None)
+                    ):
+                        with io.BytesIO(wav_bytes) as in_io:
+                            with wave.open(in_io) as in_wav:
+                                # Get WAV details from first frame
+                                session.sample_rate = in_wav.getframerate()
+                                session.sample_width = in_wav.getsampwidth()
+                                session.channels = in_wav.getnchannels()
 
-                            session.wav_file.writeframes(
-                                in_wav.readframes(in_wav.getnframes())
+                    assert session.sample_rate is not None, "No sample rate"
+                    assert session.sample_width is not None, "No sample width"
+                    assert session.channels is not None, "No channels"
+
+                    # Ensure correct format
+                    session.audio_data += RemoteHermesMqtt.maybe_convert_wav(
+                        wav_bytes,
+                        session.sample_rate,
+                        session.sample_width,
+                        session.channels,
+                    )
+
+                    if session.start_listening.stopOnSilence:
+                        # Detect silence (end of command)
+                        audio_data = RemoteHermesMqtt.maybe_convert_wav(
+                            wav_bytes,
+                            self.recorder_sample_rate,
+                            self.recorder_sample_width,
+                            self.recorder_channels,
+                        )
+                        command = session.recorder.process_chunk(audio_data)
+                        if command and (command.result == VoiceCommandResult.SUCCESS):
+                            # Complete session
+                            stop_listening = AsrStopListening(
+                                siteId=siteId, sessionId=target_id
                             )
-
-                            if session.start_listening.stopOnSilence:
-                                # Detect silence (end of command)
-                                audio_data = RemoteHermesMqtt.maybe_convert_wav(
-                                    wav_bytes,
-                                    self.recorder_sample_rate,
-                                    self.recorder_sample_width,
-                                    self.recorder_channels,
-                                )
-                                command = session.recorder.process_chunk(audio_data)
-                                if command and (
-                                    command.result == VoiceCommandResult.SUCCESS
-                                ):
-                                    # Complete session
-                                    stop_listening = AsrStopListening(
-                                        siteId=siteId, sessionId=target_id
-                                    )
-                                    async for message in self.handle_stop_listening(
-                                        stop_listening
-                                    ):
-                                        yield message
+                            async for message in self.handle_stop_listening(
+                                stop_listening
+                            ):
+                                yield message
 
             if self.wake_enabled and (sessionId is None) and self.wake_proc:
                 # Convert and send to wake command
@@ -493,13 +502,22 @@ class RemoteHermesMqtt:
                 _LOGGER.warning("Session not found for %s", stop_listening.sessionId)
                 return
 
-            assert session.wav_file
-            session.wav_file.close()
-            session.recorder.stop()
+            assert session.sample_rate is not None, "No sample rate"
+            assert session.sample_width is not None, "No sample width"
+            assert session.channels is not None, "No channels"
+
+            if session.start_listening.stopOnSilence:
+                # Use recorded voice command
+                audio_data = session.recorder.stop()
+            else:
+                # Use entire audio
+                audio_data = session.audio_data
 
             # Process entire WAV file
-            assert session.wav_io
-            wav_bytes = session.wav_io.getvalue()
+            wav_bytes = RemoteHermesMqtt.buffer_to_wav(
+                audio_data, session.sample_rate, session.sample_width, session.channels
+            )
+            _LOGGER.debug("Received %s byte(s) of WAV data", len(wav_bytes))
 
             if self.asr_url:
                 _LOGGER.debug(self.asr_url)
@@ -888,7 +906,6 @@ class RemoteHermesMqtt:
                         _LOGGER.debug("Receiving audio")
                         self.first_audio = False
 
-                    # Run outside event loop
                     self.publish_all(
                         self.handle_audio_frame(msg.payload, siteId=siteId)
                     )
@@ -904,7 +921,6 @@ class RemoteHermesMqtt:
                         _LOGGER.debug("Receiving audio")
                         self.first_audio = False
 
-                    # Run outside event loop
                     self.publish_all(
                         self.handle_audio_frame(
                             msg.payload, siteId=siteId, sessionId=sessionId
@@ -1090,3 +1106,18 @@ class RemoteHermesMqtt:
 
                 # Return original audio
                 return wav_file.readframes(wav_file.getnframes())
+
+    @classmethod
+    def buffer_to_wav(
+        cls, buffer: bytes, sample_rate: int, sample_width: int, channels: int
+    ) -> bytes:
+        """Wraps a buffer of raw audio data in a WAV"""
+        with io.BytesIO() as wav_buffer:
+            wav_file: wave.Wave_write = wave.open(wav_buffer, mode="wb")
+            with wav_file:
+                wav_file.setframerate(sample_rate)
+                wav_file.setsampwidth(sample_width)
+                wav_file.setnchannels(channels)
+                wav_file.writeframes(buffer)
+
+            return wav_buffer.getvalue()
