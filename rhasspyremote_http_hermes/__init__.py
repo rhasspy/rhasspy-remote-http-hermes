@@ -12,6 +12,7 @@ from uuid import uuid4
 
 import aiohttp
 import attr
+from paho.mqtt.matcher import MQTTMatcher
 from rhasspyhermes.asr import (
     AsrAudioCaptured,
     AsrError,
@@ -92,6 +93,7 @@ class RemoteHermesMqtt:
         recorder_sample_rate: int = 16000,
         recorder_sample_width: int = 2,
         recorder_channels: int = 1,
+        webhooks: typing.Optional[typing.Dict[str, typing.List[str]]] = None,
         siteIds: typing.Optional[typing.List[str]] = None,
         loop=None,
     ):
@@ -147,6 +149,17 @@ class RemoteHermesMqtt:
         self.recorder_sample_rate = recorder_sample_rate
         self.recorder_sample_width = recorder_sample_width
         self.recorder_channels = recorder_channels
+
+        # Webhooks
+        self.webhook_matcher: typing.Optional[MQTTMatcher] = None
+        self.webhook_topics: typing.List[str] = []
+
+        if webhooks:
+            self.webhook_matcher = MQTTMatcher()
+            self.webhook_topics = list(webhooks.keys())
+            for topic, urls in webhooks.items():
+                for url in urls:
+                    self.webhook_matcher[topic] = url
 
         self.siteIds = siteIds or []
 
@@ -726,6 +739,35 @@ class RemoteHermesMqtt:
         except Exception:
             _LOGGER.exception("handle_intent")
 
+    async def handle_webhook(self, topic: str, payload: bytes):
+        """POSTs JSON payload to URL(s)"""
+        try:
+            assert self.webhook_matcher is not None
+            json_payload: typing.Optional[typing.Dict[str, typing.Any]] = None
+
+            # Call for each URL in matching topic
+            for webhook_url in self.webhook_matcher.iter_match(topic):
+
+                # Only parse if there's at least one match
+                if json_payload is None:
+                    # Parse and check siteId
+                    json_payload = json.loads(payload)
+                    if not self._check_siteId(json_payload):
+                        return
+
+                _LOGGER.debug(
+                    "webhook %s => %s (%s byte(s))", topic, webhook_url, len(payload)
+                )
+                async with self.http_session.post(
+                    webhook_url, json=json_payload, ssl=self.ssl_context
+                ) as response:
+                    if response.status != 200:
+                        _LOGGER.warning(
+                            "Got status %s from %s", response.status, webhook_url
+                        )
+        except Exception:
+            _LOGGER.exception("handle_webhook")
+
     # -------------------------------------------------------------------------
 
     def start_wake_command(self):
@@ -763,7 +805,7 @@ class RemoteHermesMqtt:
             if self.wake_command:
                 self.start_wake_command()
 
-            topics = []
+            topics = self.webhook_topics
 
             # ASR
             if self.asr_url or self.asr_command:
@@ -870,31 +912,29 @@ class RemoteHermesMqtt:
                     )
             elif msg.topic == NluQuery.topic():
                 json_payload = json.loads(msg.payload)
-                if not self._check_siteId(json_payload):
-                    return
-
-                self.publish_all(self.handle_query(NluQuery.from_dict(json_payload)))
+                if self._check_siteId(json_payload):
+                    self.publish_all(
+                        self.handle_query(NluQuery.from_dict(json_payload))
+                    )
             elif msg.topic == TtsSay.topic():
                 json_payload = json.loads(msg.payload)
-                if not self._check_siteId(json_payload):
-                    return
-
-                self.publish_all(self.handle_say(TtsSay.from_dict(json_payload)))
+                if self._check_siteId(json_payload):
+                    self.publish_all(self.handle_say(TtsSay.from_dict(json_payload)))
             elif msg.topic == AsrStartListening.topic():
                 json_payload = json.loads(msg.payload)
-                if not self._check_siteId(json_payload):
-                    return
-
-                # Run outside event loop
-                self.handle_start_listening(AsrStartListening.from_dict(json_payload))
+                if self._check_siteId(json_payload):
+                    # Run outside event loop
+                    self.handle_start_listening(
+                        AsrStartListening.from_dict(json_payload)
+                    )
             elif msg.topic == AsrStopListening.topic():
                 json_payload = json.loads(msg.payload)
-                if not self._check_siteId(json_payload):
-                    return
-
-                self.publish_all(
-                    self.handle_stop_listening(AsrStopListening.from_dict(json_payload))
-                )
+                if self._check_siteId(json_payload):
+                    self.publish_all(
+                        self.handle_stop_listening(
+                            AsrStopListening.from_dict(json_payload)
+                        )
+                    )
             elif AsrTrain.is_topic(msg.topic):
                 siteId = AsrTrain.get_siteId(msg.topic)
                 if (not self.siteIds) or (siteId in self.siteIds):
@@ -915,52 +955,47 @@ class RemoteHermesMqtt:
                     )
             elif NluIntent.is_topic(msg.topic):
                 json_payload = json.loads(msg.payload)
-                if not self._check_siteId(json_payload):
-                    return
-
-                self.publish_all(self.handle_intent(NluIntent.from_dict(json_payload)))
+                if self._check_siteId(json_payload):
+                    self.publish_all(
+                        self.handle_intent(NluIntent.from_dict(json_payload))
+                    )
             elif AsrToggleOn.is_topic(msg.topic):
                 json_payload = json.loads(msg.payload)
-                if not self._check_siteId(json_payload):
-                    return
-
-                self.asr_enabled = True
-                _LOGGER.debug("ASR enabled")
+                if self._check_siteId(json_payload):
+                    self.asr_enabled = True
+                    _LOGGER.debug("ASR enabled")
             elif AsrToggleOff.is_topic(msg.topic):
                 json_payload = json.loads(msg.payload)
-                if not self._check_siteId(json_payload):
-                    return
-
-                self.asr_enabled = False
-                _LOGGER.debug("ASR disabled")
+                if self._check_siteId(json_payload):
+                    self.asr_enabled = False
+                    _LOGGER.debug("ASR disabled")
             elif HotwordToggleOn.is_topic(msg.topic):
                 json_payload = json.loads(msg.payload)
-                if not self._check_siteId(json_payload):
-                    return
-
-                self.wake_enabled = True
-                _LOGGER.debug("Wake word detection enabled")
+                if self._check_siteId(json_payload):
+                    self.wake_enabled = True
+                    _LOGGER.debug("Wake word detection enabled")
             elif HotwordToggleOff.is_topic(msg.topic):
                 json_payload = json.loads(msg.payload)
-                if not self._check_siteId(json_payload):
-                    return
-
-                self.wake_enabled = False
-                _LOGGER.debug("Wake word detection disabled")
+                if self._check_siteId(json_payload):
+                    self.wake_enabled = False
+                    _LOGGER.debug("Wake word detection disabled")
             elif HandleToggleOn.is_topic(msg.topic):
                 json_payload = json.loads(msg.payload)
-                if not self._check_siteId(json_payload):
-                    return
-
-                self.handle_enabled = True
-                _LOGGER.debug("Intent handling enabled")
+                if self._check_siteId(json_payload):
+                    self.handle_enabled = True
+                    _LOGGER.debug("Intent handling enabled")
             elif HandleToggleOff.is_topic(msg.topic):
                 json_payload = json.loads(msg.payload)
-                if not self._check_siteId(json_payload):
-                    return
+                if self._check_siteId(json_payload):
+                    self.handle_enabled = False
+                    _LOGGER.debug("Intent handling disabled")
 
-                self.handle_enabled = False
-                _LOGGER.debug("Intent handling disabled")
+            # Webhooks
+            if self.webhook_matcher:
+                asyncio.run_coroutine_threadsafe(
+                    self.handle_webhook(msg.topic, msg.payload), self.loop
+                )
+
         except Exception:
             _LOGGER.exception("on_message")
 

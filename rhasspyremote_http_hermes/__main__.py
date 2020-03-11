@@ -4,6 +4,7 @@ import asyncio
 import logging
 import shlex
 import typing
+from collections import defaultdict
 
 import paho.mqtt.client as mqtt
 
@@ -83,6 +84,9 @@ def main():
     parser.add_argument("--certfile", help="SSL certificate file")
     parser.add_argument("--keyfile", help="SSL private key file (optional)")
     parser.add_argument(
+        "--webhook", nargs=2, action="append", help="Topic/URL pairs for webhook(s)"
+    )
+    parser.add_argument(
         "--host", default="localhost", help="MQTT host (default: localhost)"
     )
     parser.add_argument(
@@ -124,6 +128,13 @@ def main():
     if args.wake_command:
         args.wake_command = shlex.split(args.wake_command)
 
+    if args.webhook:
+        webhooks = defaultdict(list)
+        for topic, url in args.webhook:
+            webhooks[topic].append(url)
+    else:
+        webhooks = None
+
     try:
         loop = asyncio.get_event_loop()
 
@@ -150,6 +161,7 @@ def main():
             word_transform=get_word_transform(args.casing),
             certfile=args.certfile,
             keyfile=args.keyfile,
+            webhooks=webhooks,
             siteIds=args.siteId,
             loop=loop,
         )
