@@ -148,7 +148,6 @@ class RemoteHermesMqtt(HermesClient):
             self.ssl_context.load_cert_chain(certfile, keyfile)
 
         # Async HTTP
-        self.loop = loop or asyncio.get_event_loop()
         self.http_session = aiohttp.ClientSession()
 
         # No timeout
@@ -215,6 +214,9 @@ class RemoteHermesMqtt(HermesClient):
         # Intent Handling
         if self.handle_used:
             self.subscribe(NluIntent, HandleToggleOn, HandleToggleOff)
+
+        # Event loop
+        self.loop = loop or asyncio.get_event_loop()
 
     # -------------------------------------------------------------------------
 
