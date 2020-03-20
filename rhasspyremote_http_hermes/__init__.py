@@ -1,5 +1,6 @@
 """Hermes MQTT server for Rhasspy remote server"""
 import asyncio
+import gzip
 import io
 import json
 import logging
@@ -12,6 +13,8 @@ from uuid import uuid4
 
 import aiohttp
 import attr
+import networkx as nx
+import rhasspynlu
 from paho.mqtt.matcher import MQTTMatcher
 from rhasspyhermes.asr import (
     AsrAudioCaptured,
@@ -26,6 +29,7 @@ from rhasspyhermes.asr import (
 )
 from rhasspyhermes.audioserver import AudioFrame, AudioPlayBytes, AudioSessionFrame
 from rhasspyhermes.base import Message
+from rhasspyhermes.client import HermesClient, TopicArgs
 from rhasspyhermes.handle import HandleToggleOff, HandleToggleOn
 from rhasspyhermes.intent import Intent, Slot, SlotRange
 from rhasspyhermes.nlu import (
@@ -45,11 +49,6 @@ _LOGGER = logging.getLogger(__name__)
 
 # -----------------------------------------------------------------------------
 
-TopicArgs = typing.Mapping[str, typing.Any]
-GeneratorType = typing.AsyncIterable[
-    typing.Union[Message, typing.Tuple[Message, TopicArgs]]
-]
-
 
 @attr.s(auto_attribs=True, slots=True)
 class AsrSession:
@@ -66,7 +65,7 @@ class AsrSession:
 # -----------------------------------------------------------------------------
 
 
-class RemoteHermesMqtt:
+class RemoteHermesMqtt(HermesClient):
     """Hermes MQTT server for Rhasspy remote server."""
 
     def __init__(
@@ -99,7 +98,9 @@ class RemoteHermesMqtt:
         siteIds: typing.Optional[typing.List[str]] = None,
         loop=None,
     ):
-        self.client = client
+        super().__init__(
+            "rhasspyremote_http_hermes", client, siteIds=siteIds, loop=loop
+        )
 
         # Speech to text
         self.asr_url = asr_url
@@ -107,16 +108,21 @@ class RemoteHermesMqtt:
         self.asr_train_url = asr_train_url
         self.asr_train_command = asr_train_command
         self.asr_enabled = True
+        self.asr_used = self.asr_url or self.asr_command
+        self.asr_train_used = self.asr_train_url or self.asr_train_command
 
         # Intent recognition
         self.nlu_url = nlu_url
         self.nlu_command = nlu_command
         self.nlu_train_url = nlu_train_url
         self.nlu_train_command = nlu_train_command
+        self.nlu_used = self.nlu_url or self.nlu_command
+        self.nlu_train_used = self.nlu_train_url or self.nlu_train_command
 
         # Text to speech
         self.tts_url = tts_url
         self.tts_command = tts_command
+        self.tts_used = self.tts_url or self.tts_command
 
         # Wake word detection
         self.wake_command = wake_command
@@ -125,11 +131,13 @@ class RemoteHermesMqtt:
         self.wake_sample_rate = wake_sample_rate
         self.wake_sample_width = wake_sample_width
         self.wake_channels = wake_channels
+        self.wake_used = self.wake_command
 
         # Intent handling
         self.handle_url = handle_url
         self.handle_command = handle_command
         self.handle_enabled = True
+        self.handle_used = self.handle_url or self.handle_command
 
         self.word_transform = word_transform
 
@@ -163,12 +171,50 @@ class RemoteHermesMqtt:
                 for url in urls:
                     self.webhook_matcher[topic] = url
 
-        self.siteIds = siteIds or []
-
         # sessionId -> AsrSession
         self.asr_sessions: typing.Dict[str, AsrSession] = {}
 
         self.first_audio: bool = True
+
+        # Start up
+        if self.wake_command:
+            self.start_wake_command()
+
+        # Webhooks
+        self.subscribe_topics(*self.webhook_topics)
+
+        # Wake
+        if self.wake_used:
+            self.subscribe(HotwordToggleOn, HotwordToggleOff)
+
+        # ASR
+        if self.asr_used:
+            self.subscribe(
+                AsrStartListening,
+                AsrStopListening,
+                AsrToggleOn,
+                AsrToggleOff,
+                AudioFrame,
+                AudioSessionFrame,
+            )
+
+        if self.asr_train_used:
+            self.subscribe(AsrTrain)
+
+        # NLU
+        if self.nlu_used:
+            self.subscribe(NluQuery)
+
+        if self.nlu_train_used:
+            self.subscribe(NluTrain)
+
+        # TTS
+        if self.tts_used:
+            self.subscribe(TtsSay)
+
+        # Intent Handling
+        if self.handle_used:
+            self.subscribe(NluIntent, HandleToggleOn, HandleToggleOff)
 
     # -------------------------------------------------------------------------
 
@@ -183,8 +229,6 @@ class RemoteHermesMqtt:
         ]
     ]:
         """Do intent recognition."""
-        _LOGGER.debug("<- %s", query)
-
         try:
             input_text = query.input
 
@@ -311,8 +355,6 @@ class RemoteHermesMqtt:
         typing.Union[typing.Tuple[AudioPlayBytes, TopicArgs], TtsSayFinished]
     ]:
         """Do text to speech."""
-        _LOGGER.debug("<- %s", say)
-
         try:
             if self.tts_url:
                 # Remote text to speech server
@@ -367,7 +409,7 @@ class RemoteHermesMqtt:
 
     # -------------------------------------------------------------------------
 
-    def handle_start_listening(self, start_listening: AsrStartListening):
+    async def handle_start_listening(self, start_listening: AsrStartListening):
         """Start ASR session."""
         _LOGGER.debug("<- %s", start_listening)
 
@@ -416,6 +458,10 @@ class RemoteHermesMqtt:
 
                 # Add to target ASR sessions
                 for target_id, session in target_sessions:
+                    # Skip non-matching siteId
+                    if session.start_listening.siteId != siteId:
+                        continue
+
                     session.sample_rate = sample_rate
                     session.sample_width = sample_width
                     session.channels = channels
@@ -423,7 +469,7 @@ class RemoteHermesMqtt:
 
                     if session.start_listening.stopOnSilence:
                         # Detect silence (end of command)
-                        audio_data = RemoteHermesMqtt.maybe_convert_wav(
+                        audio_data = self.maybe_convert_wav(
                             wav_bytes,
                             self.recorder_sample_rate,
                             self.recorder_sample_width,
@@ -442,7 +488,7 @@ class RemoteHermesMqtt:
 
             if self.wake_enabled and (sessionId is None) and self.wake_proc:
                 # Convert and send to wake command
-                audio_bytes = RemoteHermesMqtt.maybe_convert_wav(
+                audio_bytes = self.maybe_convert_wav(
                     wav_bytes,
                     self.wake_sample_rate,
                     self.wake_sample_width,
@@ -503,7 +549,7 @@ class RemoteHermesMqtt:
                 audio_data = session.audio_data
 
             # Process entire WAV file
-            wav_bytes = RemoteHermesMqtt.buffer_to_wav(
+            wav_bytes = self.to_wav_bytes(
                 audio_data, session.sample_rate, session.sample_width, session.channels
             )
             _LOGGER.debug("Received %s byte(s) of WAV data", len(wav_bytes))
@@ -583,12 +629,18 @@ class RemoteHermesMqtt:
 
     async def handle_asr_train(
         self, train: AsrTrain, siteId: str = "default"
-    ) -> typing.AsyncIterable[typing.Union[AsrTrainSuccess, AsrError]]:
+    ) -> typing.AsyncIterable[
+        typing.Union[typing.Tuple[AsrTrainSuccess, TopicArgs], AsrError]
+    ]:
         """Re-trains ASR system"""
-        _LOGGER.debug("<- %s(%s)", train.__class__.__name__, train.id)
         try:
+            # Load gzipped graph pickle
+            _LOGGER.debug("Loading %s", train.graph_path)
+            with gzip.GzipFile(train.graph_path, mode="rb") as graph_gzip:
+                intent_graph = nx.readwrite.gpickle.read_gpickle(graph_gzip)
+
             # Get JSON intent graph
-            json_graph = json.dumps(train.graph_dict)
+            json_graph = rhasspynlu.graph_to_json(intent_graph)
 
             if self.asr_train_url:
                 # Remote ASR server
@@ -609,7 +661,7 @@ class RemoteHermesMqtt:
                     sterr=asyncio.subprocess.PIPE,
                 )
 
-                output, error = await proc.communicate(json_graph.encode())
+                output, error = await proc.communicate(json.dumps(json_graph).encode())
 
                 if output:
                     _LOGGER.debug(output.decode())
@@ -620,7 +672,7 @@ class RemoteHermesMqtt:
                 _LOGGER.warning("Can't train ASR system. No train URL or command.")
 
             # Report success
-            yield AsrTrainSuccess(id=train.id)
+            yield (AsrTrainSuccess(id=train.id), {"siteId": siteId})
         except Exception as e:
             _LOGGER.exception("handle_asr_train")
             yield AsrError(
@@ -634,12 +686,18 @@ class RemoteHermesMqtt:
 
     async def handle_nlu_train(
         self, train: NluTrain, siteId: str = "default"
-    ) -> typing.AsyncIterable[typing.Union[NluTrainSuccess, NluError]]:
+    ) -> typing.AsyncIterable[
+        typing.Union[typing.Tuple[NluTrainSuccess, TopicArgs], NluError]
+    ]:
         """Re-trains NLU system"""
-        _LOGGER.debug("<- %s(%s)", train.__class__.__name__, train.id)
         try:
+            # Load gzipped graph pickle
+            _LOGGER.debug("Loading %s", train.graph_path)
+            with gzip.GzipFile(train.graph_path, mode="rb") as graph_gzip:
+                intent_graph = nx.readwrite.gpickle.read_gpickle(graph_gzip)
+
             # Get JSON intent graph
-            json_graph = json.dumps(train.graph_dict)
+            json_graph = rhasspynlu.graph_to_json(intent_graph)
 
             if self.nlu_train_url:
                 # Remote NLU server
@@ -660,7 +718,7 @@ class RemoteHermesMqtt:
                     stderr=asyncio.subprocess.PIPE,
                 )
 
-                output, error = await proc.communicate(json_graph.encode())
+                output, error = await proc.communicate(json.dumps(json_graph).encode())
 
                 if output:
                     _LOGGER.debug(output.decode())
@@ -671,7 +729,7 @@ class RemoteHermesMqtt:
                 _LOGGER.warning("Can't train NLU system. No train URL or command.")
 
             # Report success
-            yield NluTrainSuccess(id=train.id)
+            yield (NluTrainSuccess(id=train.id), {"siteId": siteId})
         except Exception as e:
             _LOGGER.exception("handle_nlu_train")
             yield NluError(
@@ -759,7 +817,8 @@ class RemoteHermesMqtt:
                 if json_payload is None:
                     # Parse and check siteId
                     json_payload = json.loads(payload)
-                    if not self._check_siteId(json_payload):
+                    siteId = json_payload.get("siteId", "default")
+                    if not self.valid_siteId(siteId):
                         return
 
                 _LOGGER.debug(
@@ -806,308 +865,77 @@ class RemoteHermesMqtt:
 
     # -------------------------------------------------------------------------
 
-    def on_connect(self, client, userdata, flags, rc):
-        """Connected to MQTT broker."""
-        try:
-            if self.wake_command:
-                self.start_wake_command()
-
-            topics = self.webhook_topics
-
-            # ASR
-            if self.asr_url or self.asr_command:
-                topics.extend(
-                    [
-                        AsrStartListening.topic(),
-                        AsrStopListening.topic(),
-                        AsrToggleOn.topic(),
-                        AsrToggleOff.topic(),
-                    ]
-                )
-
-            # Wake
-            if self.wake_command:
-                topics.extend([HotwordToggleOn.topic(), HotwordToggleOff.topic()])
-
-            if self.siteIds:
-                # Specific site ids
-                for siteId in self.siteIds:
-                    # ASR audio
-                    if self.asr_url or self.asr_command:
-                        topics.append(AudioFrame.topic(siteId=siteId))
-                        topics.append(
-                            AudioSessionFrame.topic(siteId=siteId, sessionId="+")
-                        )
-
-                    # Training
-                    if self.asr_train_url or self.asr_train_command:
-                        topics.append(AsrTrain.topic(siteId=siteId))
-
-                    if self.nlu_train_url or self.nlu_train_command:
-                        topics.append(NluTrain.topic(siteId=siteId))
-            else:
-                # All site ids
-                if self.asr_url or self.asr_command:
-                    # ASR audio
-                    topics.append(AudioFrame.topic(siteId="+"))
-                    topics.append(AudioSessionFrame.topic(siteId="+", sessionId="+"))
-
-                # Training
-                if self.asr_train_url or self.asr_train_command:
-                    topics.append(AsrTrain.topic(siteId="+"))
-
-                if self.nlu_train_url or self.nlu_train_command:
-                    topics.append(NluTrain.topic(siteId="+"))
-
-            # NLU
-            if self.nlu_url or self.nlu_command:
-                topics.append(NluQuery.topic())
-
-            # TTS
-            if self.tts_url or self.tts_command:
-                topics.append(TtsSay.topic())
-
-            # Intent Handling
-            if self.handle_url or self.handle_command:
-                topics.extend(
-                    [
-                        NluIntent.topic(intentName="#"),
-                        HandleToggleOn.topic(),
-                        HandleToggleOff.topic(),
-                    ]
-                )
-
-            for topic in topics:
-                self.client.subscribe(topic)
-                _LOGGER.debug("Subscribed to %s", topic)
-        except Exception:
-            _LOGGER.exception("on_connect")
-
-    def on_message(self, client, userdata, msg):
+    async def on_message(
+        self,
+        message: Message,
+        siteId: typing.Optional[str] = None,
+        sessionId: typing.Optional[str] = None,
+        topic: typing.Optional[str] = None,
+    ):
         """Received message from MQTT broker."""
-        try:
-            if AudioFrame.is_topic(msg.topic):
-                # Check siteId
-                siteId = AudioFrame.get_siteId(msg.topic)
-                if (not self.siteIds) or (siteId in self.siteIds):
-                    # Add to all active sessions
-                    if self.first_audio:
-                        _LOGGER.debug("Receiving audio")
-                        self.first_audio = False
+        if isinstance(message, AudioFrame):
+            # Add to all active sessions
+            assert siteId, "Missing siteId"
+            if self.first_audio:
+                _LOGGER.debug("Receiving audio")
+                self.first_audio = False
 
-                    self.publish_all(
-                        self.handle_audio_frame(msg.payload, siteId=siteId)
-                    )
-            elif AudioSessionFrame.is_topic(msg.topic):
-                # Check siteId
-                siteId = AudioSessionFrame.get_siteId(msg.topic)
-                sessionId = AudioSessionFrame.get_sessionId(msg.topic)
-                if ((not self.siteIds) or (siteId in self.siteIds)) and (
-                    sessionId in self.asr_sessions
-                ):
-                    # Add to active session
-                    if self.first_audio:
-                        _LOGGER.debug("Receiving audio")
-                        self.first_audio = False
+            await self.publish_all(
+                self.handle_audio_frame(message.wav_bytes, siteId=siteId)
+            )
+        elif isinstance(message, AudioSessionFrame):
+            # Check siteId
+            assert siteId and sessionId, "Missing siteId or sessionId"
+            if sessionId in self.asr_sessions:
+                # Add to active session
+                if self.first_audio:
+                    _LOGGER.debug("Receiving audio")
+                    self.first_audio = False
 
-                    self.publish_all(
-                        self.handle_audio_frame(
-                            msg.payload, siteId=siteId, sessionId=sessionId
-                        )
+                await self.publish_all(
+                    self.handle_audio_frame(
+                        message.wav_bytes, siteId=siteId, sessionId=sessionId
                     )
-            elif msg.topic == NluQuery.topic():
-                json_payload = json.loads(msg.payload)
-                if self._check_siteId(json_payload):
-                    self.publish_all(
-                        self.handle_query(NluQuery.from_dict(json_payload))
-                    )
-            elif msg.topic == TtsSay.topic():
-                json_payload = json.loads(msg.payload)
-                if self._check_siteId(json_payload):
-                    self.publish_all(self.handle_say(TtsSay.from_dict(json_payload)))
-            elif msg.topic == AsrStartListening.topic():
-                json_payload = json.loads(msg.payload)
-                if self._check_siteId(json_payload):
-                    # Run outside event loop
-                    self.handle_start_listening(
-                        AsrStartListening.from_dict(json_payload)
-                    )
-            elif msg.topic == AsrStopListening.topic():
-                json_payload = json.loads(msg.payload)
-                if self._check_siteId(json_payload):
-                    self.publish_all(
-                        self.handle_stop_listening(
-                            AsrStopListening.from_dict(json_payload)
-                        )
-                    )
-            elif AsrTrain.is_topic(msg.topic):
-                siteId = AsrTrain.get_siteId(msg.topic)
-                if (not self.siteIds) or (siteId in self.siteIds):
-                    json_payload = json.loads(msg.payload)
-                    self.publish_all(
-                        self.handle_asr_train(
-                            AsrTrain.from_dict(json_payload), siteId=siteId
-                        )
-                    )
-            elif NluTrain.is_topic(msg.topic):
-                siteId = NluTrain.get_siteId(msg.topic)
-                if (not self.siteIds) or (siteId in self.siteIds):
-                    json_payload = json.loads(msg.payload)
-                    self.publish_all(
-                        self.handle_nlu_train(
-                            NluTrain.from_dict(json_payload), siteId=siteId
-                        )
-                    )
-            elif NluIntent.is_topic(msg.topic):
-                json_payload = json.loads(msg.payload)
-                if self._check_siteId(json_payload):
-                    self.publish_all(
-                        self.handle_intent(NluIntent.from_dict(json_payload))
-                    )
-            elif AsrToggleOn.is_topic(msg.topic):
-                json_payload = json.loads(msg.payload)
-                if self._check_siteId(json_payload):
-                    self.asr_enabled = True
-                    _LOGGER.debug("ASR enabled")
-            elif AsrToggleOff.is_topic(msg.topic):
-                json_payload = json.loads(msg.payload)
-                if self._check_siteId(json_payload):
-                    self.asr_enabled = False
-                    _LOGGER.debug("ASR disabled")
-            elif HotwordToggleOn.is_topic(msg.topic):
-                json_payload = json.loads(msg.payload)
-                if self._check_siteId(json_payload):
-                    self.wake_enabled = True
-                    _LOGGER.debug("Wake word detection enabled")
-            elif HotwordToggleOff.is_topic(msg.topic):
-                json_payload = json.loads(msg.payload)
-                if self._check_siteId(json_payload):
-                    self.wake_enabled = False
-                    _LOGGER.debug("Wake word detection disabled")
-            elif HandleToggleOn.is_topic(msg.topic):
-                json_payload = json.loads(msg.payload)
-                if self._check_siteId(json_payload):
-                    self.handle_enabled = True
-                    _LOGGER.debug("Intent handling enabled")
-            elif HandleToggleOff.is_topic(msg.topic):
-                json_payload = json.loads(msg.payload)
-                if self._check_siteId(json_payload):
-                    self.handle_enabled = False
-                    _LOGGER.debug("Intent handling disabled")
-
-            # Webhooks
-            if self.webhook_matcher:
-                asyncio.run_coroutine_threadsafe(
-                    self.handle_webhook(msg.topic, msg.payload), self.loop
                 )
+        elif isinstance(message, NluQuery):
+            await self.publish_all(self.handle_query(message))
+        elif isinstance(message, TtsSay):
+            await self.publish_all(self.handle_say(message))
+        elif isinstance(message, AsrStartListening):
+            await self.handle_start_listening(message)
+        elif isinstance(message, AsrStopListening):
+            await self.publish_all(self.handle_stop_listening(message))
+        elif isinstance(message, AsrTrain):
+            assert siteId, "Missing siteId"
+            await self.publish_all(self.handle_asr_train(message, siteId=siteId))
+        elif isinstance(message, NluTrain):
+            assert siteId, "Missing siteId"
+            await self.publish_all(self.handle_nlu_train(message, siteId=siteId))
+        elif isinstance(message, NluIntent):
+            await self.publish_all(self.handle_intent(message))
+        elif isinstance(message, AsrToggleOn):
+            self.asr_enabled = True
+            _LOGGER.debug("ASR enabled")
+        elif isinstance(message, AsrToggleOff):
+            self.asr_enabled = False
+            _LOGGER.debug("ASR disabled")
+        elif isinstance(message, HotwordToggleOn):
+            self.wake_enabled = True
+            _LOGGER.debug("Wake word detection enabled")
+        elif isinstance(message, HotwordToggleOff):
+            self.wake_enabled = False
+            _LOGGER.debug("Wake word detection disabled")
+        elif isinstance(message, HandleToggleOn):
+            self.handle_enabled = True
+            _LOGGER.debug("Intent handling enabled")
+        elif isinstance(message, HandleToggleOff):
+            self.handle_enabled = False
+            _LOGGER.debug("Intent handling disabled")
+        else:
+            _LOGGER.warning("Unexpected message: %s", message)
 
-        except Exception:
-            _LOGGER.exception("on_message")
-            _LOGGER.error("%s %s", msg.topic, msg.payload)
-
-    def publish(self, message: Message, **topic_args):
-        """Publish a Hermes message to MQTT."""
-        try:
-            if isinstance(message, (AudioPlayBytes, AsrAudioCaptured)):
-                _LOGGER.debug(
-                    "-> %s(%s byte(s))",
-                    message.__class__.__name__,
-                    len(message.wav_bytes),
-                )
-                payload = message.wav_bytes
-            else:
-                _LOGGER.debug("-> %s", message)
-                payload = json.dumps(attr.asdict(message)).encode()
-
-            topic = message.topic(**topic_args)
-            _LOGGER.debug("Publishing %s char(s) to %s", len(payload), topic)
-            self.client.publish(topic, payload)
-        except Exception:
-            _LOGGER.exception("publish")
-
-    def publish_all(self, async_generator: GeneratorType):
-        """Publish all messages from an async generator"""
-        asyncio.run_coroutine_threadsafe(
-            self.async_publish_all(async_generator), self.loop
-        )
-
-    async def async_publish_all(self, async_generator: GeneratorType):
-        """Enumerate all messages in an async generator publish them"""
-        async for maybe_message in async_generator:
-            if isinstance(maybe_message, Message):
-                self.publish(maybe_message)
-            else:
-                message, kwargs = maybe_message
-                self.publish(message, **kwargs)
-
-    # -------------------------------------------------------------------------
-
-    def _check_siteId(self, json_payload: typing.Dict[str, typing.Any]) -> bool:
-        if self.siteIds:
-            return json_payload.get("siteId", "default") in self.siteIds
-
-        # All sites
-        return True
-
-    @classmethod
-    def convert_wav(
-        cls, wav_bytes: bytes, sample_rate: int, sample_width: int, channels: int
-    ) -> bytes:
-        """Converts WAV data to required format with sox. Return raw audio."""
-        return subprocess.run(
-            [
-                "sox",
-                "-t",
-                "wav",
-                "-",
-                "-r",
-                str(sample_rate),
-                "-e",
-                "signed-integer",
-                "-b",
-                str(sample_width * 8),
-                "-c",
-                str(channels),
-                "-t",
-                "raw",
-                "-",
-            ],
-            check=True,
-            stdout=subprocess.PIPE,
-            input=wav_bytes,
-        ).stdout
-
-    @classmethod
-    def maybe_convert_wav(
-        cls, wav_bytes: bytes, sample_rate: int, sample_width: int, channels: int
-    ) -> bytes:
-        """Converts WAV data to required format if necessary. Returns raw audio."""
-        with io.BytesIO(wav_bytes) as wav_io:
-            with wave.open(wav_io, "rb") as wav_file:
-                if (
-                    (wav_file.getframerate() != sample_rate)
-                    or (wav_file.getsampwidth() != sample_width)
-                    or (wav_file.getnchannels() != channels)
-                ):
-                    # Return converted wav
-                    return RemoteHermesMqtt.convert_wav(
-                        wav_bytes, sample_rate, sample_width, channels
-                    )
-
-                # Return original audio
-                return wav_file.readframes(wav_file.getnframes())
-
-    @classmethod
-    def buffer_to_wav(
-        cls, buffer: bytes, sample_rate: int, sample_width: int, channels: int
-    ) -> bytes:
-        """Wraps a buffer of raw audio data in a WAV"""
-        with io.BytesIO() as wav_buffer:
-            wav_file: wave.Wave_write = wave.open(wav_buffer, mode="wb")
-            with wav_file:
-                wav_file.setframerate(sample_rate)
-                wav_file.setsampwidth(sample_width)
-                wav_file.setnchannels(channels)
-                wav_file.writeframes(buffer)
-
-            return wav_buffer.getvalue()
+    async def on_raw_message(self, topic: str, payload: bytes):
+        """Handle raw MQTT messages from broker."""
+        # Webhooks
+        if self.webhook_matcher:
+            await self.handle_webhook(topic, payload)
