@@ -7,6 +7,7 @@ import typing
 from collections import defaultdict
 
 import paho.mqtt.client as mqtt
+import rhasspyhermes.cli as hermes_cli
 
 from . import RemoteHermesMqtt
 
@@ -86,32 +87,11 @@ def main():
     parser.add_argument(
         "--webhook", nargs=2, action="append", help="Topic/URL pairs for webhook(s)"
     )
-    parser.add_argument(
-        "--host", default="localhost", help="MQTT host (default: localhost)"
-    )
-    parser.add_argument(
-        "--port", type=int, default=1883, help="MQTT port (default: 1883)"
-    )
-    parser.add_argument(
-        "--siteId",
-        action="append",
-        help="Hermes siteId(s) to listen for (default: all)",
-    )
-    parser.add_argument(
-        "--debug", action="store_true", help="Print DEBUG messages to the console"
-    )
-    parser.add_argument(
-        "--log-format",
-        default="[%(levelname)s:%(asctime)s] %(name)s: %(message)s",
-        help="Python logger format",
-    )
+
+    hermes_cli.add_hermes_args(parser)
     args = parser.parse_args()
 
-    if args.debug:
-        logging.basicConfig(level=logging.DEBUG, format=args.log_format)
-    else:
-        logging.basicConfig(level=logging.INFO, format=args.log_format)
-
+    hermes_cli.setup_logging(args)
     _LOGGER.debug(args)
 
     # Split commands
@@ -172,13 +152,14 @@ def main():
         )
 
         _LOGGER.debug("Connecting to %s:%s", args.host, args.port)
-        client.connect(args.host, args.port)
+        hermes_cli.connect(client, args)
         client.loop_start()
 
         try:
             # Run event loop
-            loop.run_forever()
+            hermes.loop.run_forever()
         finally:
+            # Needed if using wake "command" system
             hermes.stop_wake_command()
     except KeyboardInterrupt:
         pass
