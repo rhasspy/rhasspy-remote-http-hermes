@@ -29,7 +29,7 @@ from rhasspyhermes.asr import (
 )
 from rhasspyhermes.audioserver import AudioFrame, AudioPlayBytes, AudioSessionFrame
 from rhasspyhermes.base import Message
-from rhasspyhermes.client import HermesClient, TopicArgs
+from rhasspyhermes.client import GeneratorType, HermesClient, TopicArgs
 from rhasspyhermes.handle import HandleToggleOff, HandleToggleOn
 from rhasspyhermes.intent import Intent, Slot, SlotRange
 from rhasspyhermes.nlu import (
@@ -873,7 +873,7 @@ class RemoteHermesMqtt(HermesClient):
         siteId: typing.Optional[str] = None,
         sessionId: typing.Optional[str] = None,
         topic: typing.Optional[str] = None,
-    ):
+    ) -> GeneratorType:
         """Received message from MQTT broker."""
         if isinstance(message, AudioFrame):
             # Add to all active sessions
@@ -882,9 +882,10 @@ class RemoteHermesMqtt(HermesClient):
                 _LOGGER.debug("Receiving audio")
                 self.first_audio = False
 
-            await self.publish_all(
-                self.handle_audio_frame(message.wav_bytes, siteId=siteId)
-            )
+            async for frame_result in self.handle_audio_frame(
+                message.wav_bytes, siteId=siteId
+            ):
+                yield frame_result
         elif isinstance(message, AudioSessionFrame):
             # Check siteId
             assert siteId and sessionId, "Missing siteId or sessionId"
@@ -894,27 +895,32 @@ class RemoteHermesMqtt(HermesClient):
                     _LOGGER.debug("Receiving audio")
                     self.first_audio = False
 
-                await self.publish_all(
-                    self.handle_audio_frame(
-                        message.wav_bytes, siteId=siteId, sessionId=sessionId
-                    )
-                )
+                async for session_frame_result in self.handle_audio_frame(
+                    message.wav_bytes, siteId=siteId, sessionId=sessionId
+                ):
+                    yield session_frame_result
         elif isinstance(message, NluQuery):
-            await self.publish_all(self.handle_query(message))
+            async for query_result in self.handle_query(message):
+                yield query_result
         elif isinstance(message, TtsSay):
-            await self.publish_all(self.handle_say(message))
+            async for say_result in self.handle_say(message):
+                yield say_result
         elif isinstance(message, AsrStartListening):
             await self.handle_start_listening(message)
         elif isinstance(message, AsrStopListening):
-            await self.publish_all(self.handle_stop_listening(message))
+            async for stop_result in self.handle_stop_listening(message):
+                yield stop_result
         elif isinstance(message, AsrTrain):
             assert siteId, "Missing siteId"
-            await self.publish_all(self.handle_asr_train(message, siteId=siteId))
+            async for asr_train_result in self.handle_asr_train(message, siteId=siteId):
+                yield asr_train_result
         elif isinstance(message, NluTrain):
             assert siteId, "Missing siteId"
-            await self.publish_all(self.handle_nlu_train(message, siteId=siteId))
+            async for nlu_train_result in self.handle_nlu_train(message, siteId=siteId):
+                yield nlu_train_result
         elif isinstance(message, NluIntent):
-            await self.publish_all(self.handle_intent(message))
+            async for intent_result in self.handle_intent(message):
+                yield intent_result
         elif isinstance(message, AsrToggleOn):
             self.asr_enabled = True
             _LOGGER.debug("ASR enabled")
