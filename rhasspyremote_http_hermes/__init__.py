@@ -9,10 +9,10 @@ import subprocess
 import time
 import typing
 import wave
+from dataclasses import dataclass
 from uuid import uuid4
 
 import aiohttp
-import attr
 import networkx as nx
 import rhasspynlu
 from paho.mqtt.matcher import MQTTMatcher
@@ -50,7 +50,7 @@ _LOGGER = logging.getLogger(__name__)
 # -----------------------------------------------------------------------------
 
 
-@attr.s(auto_attribs=True, slots=True)
+@dataclass
 class AsrSession:
     """WAV buffer for an ASR session"""
 
@@ -496,6 +496,7 @@ class RemoteHermesMqtt(HermesClient):
                     self.wake_sample_width,
                     self.wake_channels,
                 )
+                assert self.wake_proc.stdin
                 self.wake_proc.stdin.write(audio_bytes)
                 if self.wake_proc.poll():
                     stdout, stderr = self.wake_proc.communicate()
