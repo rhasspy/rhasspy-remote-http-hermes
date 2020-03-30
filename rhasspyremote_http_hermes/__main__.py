@@ -120,48 +120,48 @@ def main():
     else:
         webhooks = None
 
+    # Listen for messages
+    client = mqtt.Client()
+    hermes = RemoteHermesMqtt(
+        client,
+        asr_url=args.asr_url,
+        asr_train_url=args.asr_train_url,
+        asr_command=args.asr_command,
+        asr_train_command=args.asr_train_command,
+        nlu_url=args.nlu_url,
+        nlu_train_url=args.nlu_train_url,
+        nlu_command=args.nlu_command,
+        nlu_train_command=args.nlu_train_command,
+        tts_url=args.tts_url,
+        tts_command=args.tts_command,
+        wake_command=args.wake_command,
+        wake_sample_rate=args.wake_sample_rate,
+        wake_sample_width=args.wake_sample_width,
+        wake_channels=args.wake_channels,
+        handle_url=args.handle_url,
+        handle_command=args.handle_command,
+        word_transform=get_word_transform(args.casing),
+        certfile=args.certfile,
+        keyfile=args.keyfile,
+        webhooks=webhooks,
+        siteIds=args.siteId,
+    )
+
+    _LOGGER.debug("Connecting to %s:%s", args.host, args.port)
+    hermes_cli.connect(client, args)
+    client.loop_start()
+
     try:
-        # Listen for messages
-        client = mqtt.Client()
-        hermes = RemoteHermesMqtt(
-            client,
-            asr_url=args.asr_url,
-            asr_train_url=args.asr_train_url,
-            asr_command=args.asr_command,
-            asr_train_command=args.asr_train_command,
-            nlu_url=args.nlu_url,
-            nlu_train_url=args.nlu_train_url,
-            nlu_command=args.nlu_command,
-            nlu_train_command=args.nlu_train_command,
-            tts_url=args.tts_url,
-            tts_command=args.tts_command,
-            wake_command=args.wake_command,
-            wake_sample_rate=args.wake_sample_rate,
-            wake_sample_width=args.wake_sample_width,
-            wake_channels=args.wake_channels,
-            handle_url=args.handle_url,
-            handle_command=args.handle_command,
-            word_transform=get_word_transform(args.casing),
-            certfile=args.certfile,
-            keyfile=args.keyfile,
-            webhooks=webhooks,
-            siteIds=args.siteId,
-        )
-
-        _LOGGER.debug("Connecting to %s:%s", args.host, args.port)
-        hermes_cli.connect(client, args)
-        client.loop_start()
-
-        try:
-            # Run event loop
-            asyncio.run(hermes.handle_messages_async())
-        finally:
-            # Needed if using wake "command" system
-            hermes.stop_wake_command()
+        # Run event loop
+        asyncio.run(hermes.handle_messages_async())
     except KeyboardInterrupt:
         pass
     finally:
         _LOGGER.debug("Shutting down")
+
+        # Needed if using wake "command" system
+        hermes.stop_wake_command()
+
         client.loop_stop()
 
 
