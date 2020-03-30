@@ -96,11 +96,8 @@ class RemoteHermesMqtt(HermesClient):
         recorder_channels: int = 1,
         webhooks: typing.Optional[typing.Dict[str, typing.List[str]]] = None,
         siteIds: typing.Optional[typing.List[str]] = None,
-        loop=None,
     ):
-        super().__init__(
-            "rhasspyremote_http_hermes", client, siteIds=siteIds, loop=loop
-        )
+        super().__init__("rhasspyremote_http_hermes", client, siteIds=siteIds)
 
         # Speech to text
         self.asr_url = asr_url
@@ -214,9 +211,6 @@ class RemoteHermesMqtt(HermesClient):
         # Intent Handling
         if self.handle_used:
             self.subscribe(NluIntent, HandleToggleOn, HandleToggleOff)
-
-        # Event loop
-        self.loop = loop or asyncio.get_event_loop()
 
     # -------------------------------------------------------------------------
 

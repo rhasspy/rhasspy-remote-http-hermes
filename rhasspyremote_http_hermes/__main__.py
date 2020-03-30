@@ -121,8 +121,6 @@ def main():
         webhooks = None
 
     try:
-        loop = asyncio.get_event_loop()
-
         # Listen for messages
         client = mqtt.Client()
         hermes = RemoteHermesMqtt(
@@ -148,7 +146,6 @@ def main():
             keyfile=args.keyfile,
             webhooks=webhooks,
             siteIds=args.siteId,
-            loop=loop,
         )
 
         _LOGGER.debug("Connecting to %s:%s", args.host, args.port)
@@ -157,7 +154,7 @@ def main():
 
         try:
             # Run event loop
-            hermes.loop.run_forever()
+            asyncio.run(hermes.handle_messages_async())
         finally:
             # Needed if using wake "command" system
             hermes.stop_wake_command()
@@ -165,6 +162,7 @@ def main():
         pass
     finally:
         _LOGGER.debug("Shutting down")
+        client.loop_stop()
 
 
 # -----------------------------------------------------------------------------
