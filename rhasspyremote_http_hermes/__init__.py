@@ -145,7 +145,7 @@ class RemoteHermesMqtt(HermesClient):
             self.ssl_context.load_cert_chain(certfile, keyfile)
 
         # Async HTTP
-        self.http_session = aiohttp.ClientSession()
+        self._http_session: typing.Optional[aiohttp.ClientSession] = None
 
         # No timeout
         def default_recorder():
@@ -211,6 +211,14 @@ class RemoteHermesMqtt(HermesClient):
         # Intent Handling
         if self.handle_used:
             self.subscribe(NluIntent, HandleToggleOn, HandleToggleOff)
+
+    @property
+    def http_session(self):
+        """Get or create async HTTP session"""
+        if self._http_session is None:
+            self._http_session = aiohttp.ClientSession()
+
+        return self._http_session
 
     # -------------------------------------------------------------------------
 
