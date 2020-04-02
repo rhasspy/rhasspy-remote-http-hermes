@@ -85,6 +85,39 @@ def main():
         "--webhook", nargs=2, action="append", help="Topic/URL pairs for webhook(s)"
     )
 
+    # Silence detection
+    parser.add_argument(
+        "--voice-min-seconds",
+        type=float,
+        default=1.0,
+        help="Minimum number of seconds for a voice command",
+    )
+    parser.add_argument(
+        "--voice-speech-seconds",
+        type=float,
+        default=0.3,
+        help="Consecutive seconds of speech before start",
+    )
+    parser.add_argument(
+        "--voice-silence-seconds",
+        type=float,
+        default=0.5,
+        help="Consecutive seconds of silence before stop",
+    )
+    parser.add_argument(
+        "--voice-before-seconds",
+        type=float,
+        default=0.5,
+        help="Seconds to record before start",
+    )
+    parser.add_argument(
+        "--voice-sensitivity",
+        type=int,
+        choices=[1, 2, 3],
+        default=3,
+        help="VAD sensitivity (1-3)",
+    )
+
     hermes_cli.add_hermes_args(parser)
     args = parser.parse_args()
 
@@ -137,6 +170,11 @@ def main():
         certfile=args.certfile,
         keyfile=args.keyfile,
         webhooks=webhooks,
+        min_seconds=args.voice_min_seconds,
+        speech_seconds=args.voice_speech_seconds,
+        silence_seconds=args.voice_silence_seconds,
+        before_seconds=args.voice_before_seconds,
+        vad_mode=args.voice_sensitivity,
         siteIds=args.siteId,
     )
 

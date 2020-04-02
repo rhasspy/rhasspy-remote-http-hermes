@@ -100,6 +100,11 @@ class RemoteHermesMqtt(HermesClient):
         recorder_sample_width: int = 2,
         recorder_channels: int = 1,
         webhooks: typing.Optional[typing.Dict[str, typing.List[str]]] = None,
+        min_seconds: float = 1.0,
+        speech_seconds: float = 0.3,
+        silence_seconds: float = 0.5,
+        before_seconds: float = 0.5,
+        vad_mode: int = 3,
         siteIds: typing.Optional[typing.List[str]] = None,
     ):
         super().__init__("rhasspyremote_http_hermes", client, siteIds=siteIds)
@@ -155,7 +160,14 @@ class RemoteHermesMqtt(HermesClient):
 
         # No timeout
         def default_recorder():
-            return WebRtcVadRecorder(max_seconds=None)
+            return WebRtcVadRecorder(
+                max_seconds=None,
+                vad_mode=vad_mode,
+                min_seconds=min_seconds,
+                speech_seconds=speech_seconds,
+                silence_seconds=silence_seconds,
+                before_seconds=before_seconds,
+            )
 
         self.make_recorder = make_recorder or default_recorder
         self.recorder_sample_rate = recorder_sample_rate
