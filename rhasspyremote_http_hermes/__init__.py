@@ -403,7 +403,9 @@ class RemoteHermesMqtt(HermesClient):
 
     # -------------------------------------------------------------------------
 
-    async def handle_start_listening(self, start_listening: AsrStartListening):
+    async def handle_start_listening(
+        self, start_listening: AsrStartListening
+    ) -> typing.AsyncIterable[AsrError]:
         """Start ASR session."""
         _LOGGER.debug("<- %s", start_listening)
 
@@ -905,7 +907,8 @@ class RemoteHermesMqtt(HermesClient):
             async for say_result in self.handle_say(message):
                 yield say_result
         elif isinstance(message, AsrStartListening):
-            await self.handle_start_listening(message)
+            async for start_listening_result in self.handle_start_listening(message):
+                yield start_listening_result
         elif isinstance(message, AsrStopListening):
             async for stop_result in self.handle_stop_listening(message):
                 yield stop_result
