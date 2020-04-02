@@ -50,9 +50,6 @@ def main():
         help="URL of remote text to speech server (e.g., http://localhost:12101/api/text-to-speech)",
     )
     parser.add_argument(
-        "--tts-command", help="Command to execute for TTS (text to WAV)"
-    )
-    parser.add_argument(
         "--wake-command",
         help="Command to execute for wake word detection (raw audio to wakewordId)",
     )
@@ -107,9 +104,6 @@ def main():
     if args.nlu_train_command:
         args.nlu_train_command = shlex.split(args.nlu_train_command)
 
-    if args.tts_command:
-        args.tts_command = shlex.split(args.tts_command)
-
     if args.wake_command:
         args.wake_command = shlex.split(args.wake_command)
 
@@ -133,7 +127,6 @@ def main():
         nlu_command=args.nlu_command,
         nlu_train_command=args.nlu_train_command,
         tts_url=args.tts_url,
-        tts_command=args.tts_command,
         wake_command=args.wake_command,
         wake_sample_rate=args.wake_sample_rate,
         wake_sample_width=args.wake_sample_width,

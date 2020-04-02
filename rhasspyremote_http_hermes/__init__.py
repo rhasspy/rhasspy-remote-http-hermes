@@ -42,7 +42,7 @@ from rhasspyhermes.nlu import (
     NluTrain,
     NluTrainSuccess,
 )
-from rhasspyhermes.tts import TtsSay, TtsSayFinished
+from rhasspyhermes.tts import TtsError, TtsSay, TtsSayFinished
 from rhasspyhermes.wake import (
     HotwordDetected,
     HotwordToggleOff,
@@ -86,7 +86,6 @@ class RemoteHermesMqtt(HermesClient):
         nlu_train_url: typing.Optional[str] = None,
         nlu_train_command: typing.Optional[typing.List[str]] = None,
         tts_url: typing.Optional[str] = None,
-        tts_command: typing.Optional[typing.List[str]] = None,
         wake_command: typing.Optional[typing.List[str]] = None,
         wake_sample_rate: int = 16000,
         wake_sample_width: int = 2,
@@ -125,8 +124,7 @@ class RemoteHermesMqtt(HermesClient):
 
         # Text to speech
         self.tts_url = tts_url
-        self.tts_command = tts_command
-        self.tts_used = self.tts_url or self.tts_command
+        self.tts_used = self.tts_url
 
         # Wake word detection
         self.wake_command = wake_command
@@ -364,7 +362,7 @@ class RemoteHermesMqtt(HermesClient):
     async def handle_say(
         self, say: TtsSay
     ) -> typing.AsyncIterable[
-        typing.Union[typing.Tuple[AudioPlayBytes, TopicArgs], TtsSayFinished]
+        typing.Union[typing.Tuple[AudioPlayBytes, TopicArgs], TtsSayFinished, TtsError]
     ]:
         """Do text to speech."""
         try:
@@ -374,6 +372,7 @@ class RemoteHermesMqtt(HermesClient):
 
                 params = {}
                 if say.lang:
+                    # Add ?language=<lang> query parameter
                     params["language"] = say.lang
 
                 async with self.http_session.post(
@@ -394,30 +393,13 @@ class RemoteHermesMqtt(HermesClient):
                         )
                     else:
                         _LOGGER.error("Received empty response")
-            elif self.tts_command:
-                # Local text to speech process
-                _LOGGER.debug(self.tts_command)
-
-                proc = await asyncio.create_subprocess_exec(
-                    *self.tts_command,
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.PIPE,
-                )
-
-                output, error = await proc.communicate()
-
-                if error:
-                    _LOGGER.debug(error.decode())
-
-                yield (
-                    AudioPlayBytes(wav_bytes=output),
-                    {"siteId": say.siteId, "requestId": say.id},
-                )
-
-        except Exception:
+        except Exception as e:
             _LOGGER.exception("handle_say")
+            yield TtsError(
+                error=str(e), context=say.id, siteId=say.siteId, sessionId=say.sessionId
+            )
         finally:
-            yield TtsSayFinished(id=say.id, sessionId=say.sessionId)
+            yield TtsSayFinished(id=say.id, siteId=say.siteId, sessionId=say.sessionId)
 
     # -------------------------------------------------------------------------
 
@@ -432,8 +414,14 @@ class RemoteHermesMqtt(HermesClient):
 
             self.asr_sessions[start_listening.sessionId] = session
             session.recorder.start()
-        except Exception:
+        except Exception as e:
             _LOGGER.exception("handle_start_listening")
+            yield AsrError(
+                error=str(e),
+                context="",
+                siteId=start_listening.siteId,
+                sessionId=start_listening.sessionId,
+            )
 
     # -------------------------------------------------------------------------
 
