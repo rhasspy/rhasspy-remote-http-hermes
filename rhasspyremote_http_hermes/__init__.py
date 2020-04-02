@@ -24,6 +24,7 @@ from rhasspyhermes.asr import (
     AsrTextCaptured,
     AsrToggleOff,
     AsrToggleOn,
+    AsrToggleReason,
     AsrTrain,
     AsrTrainSuccess,
 )
@@ -42,7 +43,12 @@ from rhasspyhermes.nlu import (
     NluTrainSuccess,
 )
 from rhasspyhermes.tts import TtsSay, TtsSayFinished
-from rhasspyhermes.wake import HotwordDetected, HotwordToggleOff, HotwordToggleOn
+from rhasspyhermes.wake import (
+    HotwordDetected,
+    HotwordToggleOff,
+    HotwordToggleOn,
+    HotwordToggleReason,
+)
 from rhasspysilence import VoiceCommandRecorder, VoiceCommandResult, WebRtcVadRecorder
 
 _LOGGER = logging.getLogger(__name__)
@@ -107,6 +113,7 @@ class RemoteHermesMqtt(HermesClient):
         self.asr_enabled = True
         self.asr_used = self.asr_url or self.asr_command
         self.asr_train_used = self.asr_train_url or self.asr_train_command
+        self.asr_disabled_reasons: typing.Set[str] = set()
 
         # Intent recognition
         self.nlu_url = nlu_url
@@ -129,6 +136,7 @@ class RemoteHermesMqtt(HermesClient):
         self.wake_sample_width = wake_sample_width
         self.wake_channels = wake_channels
         self.wake_used = self.wake_command
+        self.wake_disabled_reasons: typing.Set[str] = set()
 
         # Intent handling
         self.handle_url = handle_url
@@ -925,16 +933,36 @@ class RemoteHermesMqtt(HermesClient):
             async for intent_result in self.handle_intent(message):
                 yield intent_result
         elif isinstance(message, AsrToggleOn):
-            self.asr_enabled = True
-            _LOGGER.debug("ASR enabled")
+            if message.reason == AsrToggleReason.UNKNOWN:
+                # Always enable on unknown
+                self.asr_disabled_reasons.clear()
+            else:
+                self.asr_disabled_reasons.discard(message.reason)
+
+            if self.asr_disabled_reasons:
+                _LOGGER.debug("Still disabled: %s", self.asr_disabled_reasons)
+            else:
+                self.asr_enabled = True
+                _LOGGER.debug("ASR enabled")
         elif isinstance(message, AsrToggleOff):
             self.asr_enabled = False
+            self.asr_disabled_reasons.add(message.reason)
             _LOGGER.debug("ASR disabled")
         elif isinstance(message, HotwordToggleOn):
-            self.wake_enabled = True
-            _LOGGER.debug("Wake word detection enabled")
+            if message.reason == HotwordToggleReason.UNKNOWN:
+                # Always enable on unknown
+                self.wake_disabled_reasons.clear()
+            else:
+                self.wake_disabled_reasons.discard(message.reason)
+
+            if self.wake_disabled_reasons:
+                _LOGGER.debug("Still disabled: %s", self.wake_disabled_reasons)
+            else:
+                self.wake_enabled = True
+                _LOGGER.debug("Wake word detection enabled")
         elif isinstance(message, HotwordToggleOff):
             self.wake_enabled = False
+            self.wake_disabled_reasons.add(message.reason)
             _LOGGER.debug("Wake word detection disabled")
         elif isinstance(message, HandleToggleOn):
             self.handle_enabled = True
