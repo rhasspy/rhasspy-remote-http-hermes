@@ -382,7 +382,7 @@ class RemoteHermesMqtt(HermesClient):
                 # Remote text to speech server
                 _LOGGER.debug(self.tts_url)
 
-                params = {}
+                params = {"play": "false"}
                 if say.lang:
                     # Add ?language=<lang> query parameter
                     params["language"] = say.lang
