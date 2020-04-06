@@ -87,6 +87,12 @@ def main():
 
     # Silence detection
     parser.add_argument(
+        "--voice-skip-seconds",
+        type=float,
+        default=0.0,
+        help="Seconds of audio to skip before a voice command",
+    )
+    parser.add_argument(
         "--voice-min-seconds",
         type=float,
         default=1.0,
@@ -170,6 +176,7 @@ def main():
         certfile=args.certfile,
         keyfile=args.keyfile,
         webhooks=webhooks,
+        skip_seconds=args.voice_skip_seconds,
         min_seconds=args.voice_min_seconds,
         speech_seconds=args.voice_speech_seconds,
         silence_seconds=args.voice_silence_seconds,

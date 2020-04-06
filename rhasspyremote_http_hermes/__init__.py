@@ -100,6 +100,7 @@ class RemoteHermesMqtt(HermesClient):
         recorder_sample_width: int = 2,
         recorder_channels: int = 1,
         webhooks: typing.Optional[typing.Dict[str, typing.List[str]]] = None,
+        skip_seconds: float = 0.0,
         min_seconds: float = 1.0,
         speech_seconds: float = 0.3,
         silence_seconds: float = 0.5,
@@ -163,6 +164,7 @@ class RemoteHermesMqtt(HermesClient):
             return WebRtcVadRecorder(
                 max_seconds=None,
                 vad_mode=vad_mode,
+                skip_seconds=skip_seconds,
                 min_seconds=min_seconds,
                 speech_seconds=speech_seconds,
                 silence_seconds=silence_seconds,
