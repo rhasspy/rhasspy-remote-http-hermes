@@ -106,9 +106,9 @@ class RemoteHermesMqtt(HermesClient):
         silence_seconds: float = 0.5,
         before_seconds: float = 0.5,
         vad_mode: int = 3,
-        siteIds: typing.Optional[typing.List[str]] = None,
+        site_ids: typing.Optional[typing.List[str]] = None,
     ):
-        super().__init__("rhasspyremote_http_hermes", client, siteIds=siteIds)
+        super().__init__("rhasspyremote_http_hermes", client, site_ids=site_ids)
 
         # Speech to text
         self.asr_url = asr_url
@@ -187,8 +187,8 @@ class RemoteHermesMqtt(HermesClient):
                 for url in urls:
                     self.webhook_matcher[topic] = url
 
-        # sessionId -> AsrSession
-        self.asr_sessions: typing.Dict[str, AsrSession] = {}
+        # session_id -> AsrSession
+        self.asr_sessions: typing.Dict[typing.Optional[str], AsrSession] = {}
 
         self.first_audio: bool = True
 
@@ -264,8 +264,14 @@ class RemoteHermesMqtt(HermesClient):
                 # Use remote server
                 _LOGGER.debug(self.nlu_url)
 
+                params = {}
+
+                # Add intent filter
+                if query.intent_filter:
+                    params["intentFilter"] = ",".join(query.intent_filter)
+
                 async with self.http_session.post(
-                    self.nlu_url, data=input_text, ssl=self.ssl_context
+                    self.nlu_url, data=input_text, params=params, ssl=self.ssl_context
                 ) as response:
                     response.raise_for_status()
                     intent_dict = await response.json()
@@ -293,82 +299,68 @@ class RemoteHermesMqtt(HermesClient):
             if intent_name:
                 # Recognized
                 tokens = query.input.split()
+                slots = [
+                    Slot(
+                        entity=e["entity"],
+                        slot_name=e["entity"],
+                        confidence=1,
+                        value=e["value"],
+                        raw_value=e.get("raw_value", e["value"]),
+                        range=SlotRange(
+                            start=e.get("start", 0),
+                            end=e.get("end", 1),
+                            raw_start=e.get("raw_start"),
+                            raw_end=e.get("raw_end"),
+                        ),
+                    )
+                    for e in intent_dict.get("entities", [])
+                ]
 
                 yield NluIntentParsed(
                     input=query.input,
                     id=query.id,
-                    siteId=query.siteId,
-                    sessionId=query.sessionId,
+                    site_id=query.site_id,
+                    session_id=query.session_id,
                     intent=Intent(
-                        intentName=intent_name,
-                        confidenceScore=intent_dict["intent"].get("confidence", 1.0),
+                        intent_name=intent_name,
+                        confidence_score=intent_dict["intent"].get("confidence", 1.0),
                     ),
-                    slots=[
-                        Slot(
-                            entity=e["entity"],
-                            slotName=e["entity"],
-                            confidence=1,
-                            value=e["value"],
-                            raw_value=e.get("raw_value", e["value"]),
-                            range=SlotRange(
-                                start=e.get("start", 0),
-                                end=e.get("end", 1),
-                                raw_start=e.get("raw_start"),
-                                raw_end=e.get("raw_end"),
-                            ),
-                        )
-                        for e in intent_dict.get("entities", [])
-                    ],
+                    slots=slots,
                 )
 
                 yield (
                     NluIntent(
                         input=query.input,
                         id=query.id,
-                        siteId=query.siteId,
-                        sessionId=query.sessionId,
+                        site_id=query.site_id,
+                        session_id=query.session_id,
                         intent=Intent(
-                            intentName=intent_name,
-                            confidenceScore=intent_dict["intent"].get(
+                            intent_name=intent_name,
+                            confidence_score=intent_dict["intent"].get(
                                 "confidence", 1.0
                             ),
                         ),
-                        slots=[
-                            Slot(
-                                entity=e["entity"],
-                                slotName=e["entity"],
-                                confidence=1,
-                                value=e["value"],
-                                raw_value=e.get("raw_value", e["value"]),
-                                range=SlotRange(
-                                    start=e.get("start", 0),
-                                    end=e.get("end", 1),
-                                    raw_start=e.get("raw_start"),
-                                    raw_end=e.get("raw_end"),
-                                ),
-                            )
-                            for e in intent_dict.get("entities", [])
-                        ],
-                        asrTokens=tokens,
-                        rawAsrTokens=tokens,
+                        slots=slots,
+                        asr_tokens=[NluIntent.make_asr_tokens(tokens)],
+                        raw_input=query.input,
                     ),
-                    {"intentName": intent_name},
+                    {"intent_name": intent_name},
                 )
             else:
                 # Not recognized
                 yield NluIntentNotRecognized(
                     input=query.input,
                     id=query.id,
-                    siteId=query.siteId,
-                    sessionId=query.sessionId,
+                    site_id=query.site_id,
+                    session_id=query.session_id,
                 )
         except Exception as e:
             _LOGGER.exception("handle_query")
             yield NluError(
                 error=repr(e),
                 context=repr(query),
-                siteId=query.siteId,
-                sessionId=query.sessionId,
+                site_id=query.site_id,
+                session_id=query.session_id,
             )
 
     # -------------------------------------------------------------------------
@@ -403,17 +395,22 @@ class RemoteHermesMqtt(HermesClient):
                     if wav_bytes:
                         yield (
                             AudioPlayBytes(wav_bytes=wav_bytes),
-                            {"siteId": say.siteId, "requestId": say.id},
+                            {"site_id": say.site_id, "request_id": say.id},
                         )
                     else:
                         _LOGGER.error("Received empty response")
         except Exception as e:
             _LOGGER.exception("handle_say")
             yield TtsError(
-                error=str(e), context=say.id, siteId=say.siteId, sessionId=say.sessionId
+                error=str(e),
+                context=say.id,
+                site_id=say.site_id,
+                session_id=say.session_id,
             )
         finally:
-            yield TtsSayFinished(id=say.id, siteId=say.siteId, sessionId=say.sessionId)
+            yield TtsSayFinished(
+                id=say.id, site_id=say.site_id, session_id=say.session_id
+            )
 
     # -------------------------------------------------------------------------
 
@@ -428,15 +425,15 @@ class RemoteHermesMqtt(HermesClient):
                 start_listening=start_listening, recorder=self.make_recorder()
             )
 
-            self.asr_sessions[start_listening.sessionId] = session
+            self.asr_sessions[start_listening.session_id] = session
             session.recorder.start()
         except Exception as e:
             _LOGGER.exception("handle_start_listening")
             yield AsrError(
                 error=str(e),
                 context="",
-                siteId=start_listening.siteId,
-                sessionId=start_listening.sessionId,
+                site_id=start_listening.site_id,
+                session_id=start_listening.session_id,
             )
 
     # -------------------------------------------------------------------------
@@ -444,8 +441,8 @@ class RemoteHermesMqtt(HermesClient):
     async def handle_audio_frame(
         self,
         wav_bytes: bytes,
-        siteId: str = "default",
-        sessionId: typing.Optional[str] = None,
+        site_id: str = "default",
+        session_id: typing.Optional[str] = None,
     ) -> typing.AsyncIterable[
         typing.Union[
             typing.Tuple[HotwordDetected, TopicArgs],
@@ -457,12 +454,12 @@ class RemoteHermesMqtt(HermesClient):
         """Add audio frame to open sessions."""
         try:
             if self.asr_enabled:
-                if sessionId is None:
+                if session_id is None:
                     # Add to every open session
                     target_sessions = list(self.asr_sessions.items())
                 else:
                     # Add to single session
-                    target_sessions = [(sessionId, self.asr_sessions[sessionId])]
+                    target_sessions = [(session_id, self.asr_sessions[session_id])]
 
                 with io.BytesIO(wav_bytes) as in_io:
                     with wave.open(in_io) as in_wav:
@@ -474,8 +471,8 @@ class RemoteHermesMqtt(HermesClient):
 
                 # Add to target ASR sessions
                 for target_id, session in target_sessions:
-                    # Skip non-matching siteId
-                    if session.start_listening.siteId != siteId:
+                    # Skip non-matching site_id
+                    if session.start_listening.site_id != site_id:
                         continue
 
                     session.sample_rate = sample_rate
@@ -483,7 +480,7 @@ class RemoteHermesMqtt(HermesClient):
                     session.channels = channels
                     session.audio_data += audio_data
 
-                    if session.start_listening.stopOnSilence:
+                    if session.start_listening.stop_on_silence:
                         # Detect silence (end of command)
                         audio_data = self.maybe_convert_wav(
                             wav_bytes,
@@ -495,14 +492,14 @@ class RemoteHermesMqtt(HermesClient):
                         if command and (command.result == VoiceCommandResult.SUCCESS):
                             # Complete session
                             stop_listening = AsrStopListening(
-                                siteId=siteId, sessionId=target_id
+                                site_id=site_id, session_id=target_id
                             )
                             async for message in self.handle_stop_listening(
                                 stop_listening
                             ):
                                 yield message
 
-            if self.wake_enabled and (sessionId is None) and self.wake_proc:
+            if self.wake_enabled and (session_id is None) and self.wake_proc:
                 # Convert and send to wake command
                 audio_bytes = self.maybe_convert_wav(
                     wav_bytes,
@@ -517,17 +514,17 @@ class RemoteHermesMqtt(HermesClient):
                     if stderr:
                         _LOGGER.debug(stderr.decode())
 
-                    wakewordId = stdout.decode().strip()
-                    _LOGGER.debug("Detected wake word %s", wakewordId)
+                    wakeword_id = stdout.decode().strip()
+                    _LOGGER.debug("Detected wake word %s", wakeword_id)
                     yield (
                         HotwordDetected(
-                            modelId=wakewordId,
-                            modelVersion="",
-                            modelType="personal",
-                            currentSensitivity=1.0,
-                            siteId=siteId,
+                            model_id=wakeword_id,
+                            model_version="",
+                            model_type="personal",
+                            current_sensitivity=1.0,
+                            site_id=site_id,
                         ),
-                        {"wakewordId": wakewordId},
+                        {"wakeword_id": wakeword_id},
                     )
 
                     # Restart wake process
@@ -549,16 +546,16 @@ class RemoteHermesMqtt(HermesClient):
         _LOGGER.debug("<- %s", stop_listening)
 
         try:
-            session = self.asr_sessions.pop(stop_listening.sessionId, None)
+            session = self.asr_sessions.pop(stop_listening.session_id, None)
             if session is None:
-                _LOGGER.warning("Session not found for %s", stop_listening.sessionId)
+                _LOGGER.warning("Session not found for %s", stop_listening.session_id)
                 return
 
             assert session.sample_rate is not None, "No sample rate"
             assert session.sample_width is not None, "No sample width"
             assert session.channels is not None, "No channels"
 
-            if session.start_listening.stopOnSilence:
+            if session.start_listening.stop_on_silence:
                 # Use recorded voice command
                 audio_data = session.recorder.stop()
             else:
@@ -619,17 +616,17 @@ class RemoteHermesMqtt(HermesClient):
                 text=transcription_dict.get("text", ""),
                 likelihood=float(transcription_dict.get("likelihood", 0)),
                 seconds=float(transcription_dict.get("transcribe_seconds", 0)),
-                siteId=stop_listening.siteId,
-                sessionId=stop_listening.sessionId,
+                site_id=stop_listening.site_id,
+                session_id=stop_listening.session_id,
             )
 
-            if session.start_listening.sendAudioCaptured:
+            if session.start_listening.send_audio_captured:
                 # Send audio data
                 yield (
                     AsrAudioCaptured(wav_bytes=wav_bytes),
                     {
-                        "siteId": stop_listening.siteId,
-                        "sessionId": stop_listening.sessionId,
+                        "site_id": stop_listening.site_id,
+                        "session_id": stop_listening.session_id,
                     },
                 )
 
@@ -638,14 +635,14 @@ class RemoteHermesMqtt(HermesClient):
             yield AsrError(
                 error=str(e),
                 context=f"url='{self.asr_url}', command='{self.asr_command}'",
-                siteId=stop_listening.siteId,
-                sessionId=stop_listening.sessionId,
+                site_id=stop_listening.site_id,
+                session_id=stop_listening.session_id,
             )
 
     # -------------------------------------------------------------------------
 
     async def handle_asr_train(
-        self, train: AsrTrain, siteId: str = "default"
+        self, train: AsrTrain, site_id: str = "default"
     ) -> typing.AsyncIterable[
         typing.Union[typing.Tuple[AsrTrainSuccess, TopicArgs], AsrError]
     ]:
@@ -689,20 +686,20 @@ class RemoteHermesMqtt(HermesClient):
                 _LOGGER.warning("Can't train ASR system. No train URL or command.")
 
             # Report success
-            yield (AsrTrainSuccess(id=train.id), {"siteId": siteId})
+            yield (AsrTrainSuccess(id=train.id), {"site_id": site_id})
         except Exception as e:
             _LOGGER.exception("handle_asr_train")
             yield AsrError(
                 error=str(e),
                 context=f"url='{self.asr_train_url}', command='{self.asr_train_command}'",
-                siteId=siteId,
-                sessionId=train.id,
+                site_id=site_id,
+                session_id=train.id,
             )
 
     # -------------------------------------------------------------------------
 
     async def handle_nlu_train(
-        self, train: NluTrain, siteId: str = "default"
+        self, train: NluTrain, site_id: str = "default"
     ) -> typing.AsyncIterable[
         typing.Union[typing.Tuple[NluTrainSuccess, TopicArgs], NluError]
     ]:
@@ -746,14 +743,14 @@ class RemoteHermesMqtt(HermesClient):
                 _LOGGER.warning("Can't train NLU system. No train URL or command.")
 
             # Report success
-            yield (NluTrainSuccess(id=train.id), {"siteId": siteId})
+            yield (NluTrainSuccess(id=train.id), {"site_id": site_id})
         except Exception as e:
             _LOGGER.exception("handle_nlu_train")
             yield NluError(
                 error=str(e),
                 context=f"url='{self.nlu_train_url}', command='{self.nlu_train_command}'",
-                siteId=siteId,
-                sessionId=train.id,
+                site_id=site_id,
+                session_id=train.id,
             )
 
     # -------------------------------------------------------------------------
@@ -770,8 +767,8 @@ class RemoteHermesMqtt(HermesClient):
             tts_text = ""
             intent_dict = intent.to_rhasspy_dict()
 
-            # Add siteId
-            intent_dict["siteId"] = intent.siteId
+            # Add site_id
+            intent_dict["site_id"] = intent.site_id
 
             if self.handle_url:
                 # Remote server
@@ -815,8 +812,8 @@ class RemoteHermesMqtt(HermesClient):
                 yield TtsSay(
                     text=tts_text,
                     id=str(uuid4()),
-                    siteId=intent.siteId,
-                    sessionId=intent.sessionId,
+                    site_id=intent.site_id,
+                    session_id=intent.session_id,
                 )
         except Exception:
             _LOGGER.exception("handle_intent")
@@ -832,10 +829,10 @@ class RemoteHermesMqtt(HermesClient):
 
                 # Only parse if there's at least one match
                 if json_payload is None:
-                    # Parse and check siteId
+                    # Parse and check site_id
                     json_payload = json.loads(payload)
-                    siteId = json_payload.get("siteId", "default")
-                    if not self.valid_siteId(siteId):
+                    site_id = json_payload.get("site_id", "default")
+                    if not self.valid_site_id(site_id):
                         return
 
                 _LOGGER.debug(
@@ -885,33 +882,33 @@ class RemoteHermesMqtt(HermesClient):
     async def on_message(
         self,
         message: Message,
-        siteId: typing.Optional[str] = None,
-        sessionId: typing.Optional[str] = None,
+        site_id: typing.Optional[str] = None,
+        session_id: typing.Optional[str] = None,
         topic: typing.Optional[str] = None,
     ) -> GeneratorType:
         """Received message from MQTT broker."""
         if isinstance(message, AudioFrame):
             # Add to all active sessions
-            assert siteId, "Missing siteId"
+            assert site_id, "Missing site_id"
             if self.first_audio:
                 _LOGGER.debug("Receiving audio")
                 self.first_audio = False
 
             async for frame_result in self.handle_audio_frame(
-                message.wav_bytes, siteId=siteId
+                message.wav_bytes, site_id=site_id
             ):
                 yield frame_result
         elif isinstance(message, AudioSessionFrame):
-            # Check siteId
-            assert siteId and sessionId, "Missing siteId or sessionId"
-            if sessionId in self.asr_sessions:
+            # Check site_id
+            assert site_id and session_id, "Missing site_id or session_id"
+            if session_id in self.asr_sessions:
                 # Add to active session
                 if self.first_audio:
                     _LOGGER.debug("Receiving audio")
                     self.first_audio = False
 
                 async for session_frame_result in self.handle_audio_frame(
-                    message.wav_bytes, siteId=siteId, sessionId=sessionId
+                    message.wav_bytes, site_id=site_id, session_id=session_id
                 ):
                     yield session_frame_result
         elif isinstance(message, NluQuery):
@@ -927,12 +924,16 @@ class RemoteHermesMqtt(HermesClient):
             async for stop_result in self.handle_stop_listening(message):
                 yield stop_result
         elif isinstance(message, AsrTrain):
-            assert siteId, "Missing siteId"
-            async for asr_train_result in self.handle_asr_train(message, siteId=siteId):
+            assert site_id, "Missing site_id"
+            async for asr_train_result in self.handle_asr_train(
+                message, site_id=site_id
+            ):
                 yield asr_train_result
         elif isinstance(message, NluTrain):
-            assert siteId, "Missing siteId"
-            async for nlu_train_result in self.handle_nlu_train(message, siteId=siteId):
+            assert site_id, "Missing site_id"
+            async for nlu_train_result in self.handle_nlu_train(
+                message, site_id=site_id
+            ):
                 yield nlu_train_result
         elif isinstance(message, NluIntent):
             async for intent_result in self.handle_intent(message):

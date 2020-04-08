@@ -51,7 +51,7 @@ def main():
     )
     parser.add_argument(
         "--wake-command",
-        help="Command to execute for wake word detection (raw audio to wakewordId)",
+        help="Command to execute for wake word detection (raw audio to wakeword id)",
     )
     parser.add_argument(
         "--wake-sample-rate",
@@ -182,7 +182,7 @@ def main():
         silence_seconds=args.voice_silence_seconds,
         before_seconds=args.voice_before_seconds,
         vad_mode=args.voice_sensitivity,
-        siteIds=args.siteId,
+        site_ids=args.site_id,
     )
 
     _LOGGER.debug("Connecting to %s:%s", args.host, args.port)
