@@ -304,7 +304,7 @@ class RemoteHermesMqtt(HermesClient):
                         entity=e["entity"],
                         slot_name=e["entity"],
                         confidence=1,
-                        value=e["value"],
+                        value=e.get("value_details", {"value": ["value"]}),
                         raw_value=e.get("raw_value", e["value"]),
                         range=SlotRange(
                             start=e.get("start", 0),
