@@ -11,7 +11,7 @@ import rhasspyhermes.cli as hermes_cli
 
 from . import RemoteHermesMqtt
 
-_LOGGER = logging.getLogger(__name__)
+_LOGGER = logging.getLogger("rhasspyremote_http_hermes")
 
 
 def main():

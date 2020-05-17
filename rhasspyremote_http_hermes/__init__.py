@@ -51,7 +51,7 @@ from rhasspyhermes.wake import (
 )
 from rhasspysilence import VoiceCommandRecorder, VoiceCommandResult, WebRtcVadRecorder
 
-_LOGGER = logging.getLogger(__name__)
+_LOGGER = logging.getLogger("rhasspyremote_http_hermes")
 
 # -----------------------------------------------------------------------------
 
@@ -831,7 +831,7 @@ class RemoteHermesMqtt(HermesClient):
                 if json_payload is None:
                     # Parse and check site_id
                     json_payload = json.loads(payload)
-                    site_id = json_payload.get("site_id", "default")
+                    site_id = json_payload.get("siteId", "default")
                     if not self.valid_site_id(site_id):
                         return
 
@@ -889,7 +889,7 @@ class RemoteHermesMqtt(HermesClient):
         """Received message from MQTT broker."""
         if isinstance(message, AudioFrame):
             # Add to all active sessions
-            assert site_id, "Missing site_id"
+            assert site_id, "Missing site id"
             if self.first_audio:
                 _LOGGER.debug("Receiving audio")
                 self.first_audio = False
@@ -900,7 +900,7 @@ class RemoteHermesMqtt(HermesClient):
                 yield frame_result
         elif isinstance(message, AudioSessionFrame):
             # Check site_id
-            assert site_id and session_id, "Missing site_id or session_id"
+            assert site_id and session_id, "Missing site id or session id"
             if session_id in self.asr_sessions:
                 # Add to active session
                 if self.first_audio:
@@ -924,13 +924,13 @@ class RemoteHermesMqtt(HermesClient):
             async for stop_result in self.handle_stop_listening(message):
                 yield stop_result
         elif isinstance(message, AsrTrain):
-            assert site_id, "Missing site_id"
+            assert site_id, "Missing site id"
             async for asr_train_result in self.handle_asr_train(
                 message, site_id=site_id
             ):
                 yield asr_train_result
         elif isinstance(message, NluTrain):
-            assert site_id, "Missing site_id"
+            assert site_id, "Missing site id"
             async for nlu_train_result in self.handle_nlu_train(
                 message, site_id=site_id
             ):
