@@ -343,6 +343,8 @@ class RemoteHermesMqtt(HermesClient):
                         slots=slots,
                         asr_tokens=[NluIntent.make_asr_tokens(tokens)],
                         raw_input=query.input,
+                        wakeword_id=query.wakeword_id,
+                        lang=query.lang,
                     ),
                     {"intent_name": intent_name},
                 )
@@ -618,6 +620,7 @@ class RemoteHermesMqtt(HermesClient):
                 seconds=float(transcription_dict.get("transcribe_seconds", 0)),
                 site_id=stop_listening.site_id,
                 session_id=stop_listening.session_id,
+                lang=session.start_listening.lang,
             )
 
             if session.start_listening.send_audio_captured:
