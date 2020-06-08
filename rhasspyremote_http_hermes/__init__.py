@@ -803,10 +803,16 @@ class RemoteHermesMqtt(HermesClient):
                 if error:
                     _LOGGER.debug(error.decode())
 
-                response_dict = json.loads(output)
+                try:
+                    response_dict = json.loads(output)
 
-                # Check for speech response
-                tts_text = response_dict.get("speech", {}).get("text", "")
+                    # Check for speech response
+                    tts_text = response_dict.get("speech", {}).get("text", "")
+                except json.JSONDecodeError as e:
+                    if output:
+                        # Only report error if non-empty output
+                        _LOGGER.warning(f"Failed to parse output as JSON: {e}")
+                        _LOGGER.warning(f"Output: {output}")
             else:
                 _LOGGER.warning("Can't handle intent. No handle URL or command.")
 

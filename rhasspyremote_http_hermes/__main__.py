@@ -146,6 +146,9 @@ def main():
     if args.wake_command:
         args.wake_command = shlex.split(args.wake_command)
 
+    if args.handle_command:
+        args.handle_command = shlex.split(args.handle_command)
+
     if args.webhook:
         webhooks = defaultdict(list)
         for topic, url in args.webhook:
