@@ -811,8 +811,8 @@ class RemoteHermesMqtt(HermesClient):
                 except json.JSONDecodeError as e:
                     if output:
                         # Only report error if non-empty output
-                        _LOGGER.warning(f"Failed to parse output as JSON: {e}")
-                        _LOGGER.warning(f"Output: {output}")
+                        _LOGGER.warning("Failed to parse output as JSON: %s", e)
+                        _LOGGER.warning("Output: %s", output)
             else:
                 _LOGGER.warning("Can't handle intent. No handle URL or command.")
 
