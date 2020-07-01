@@ -41,6 +41,6 @@ docker buildx build \
         -f "${DOCKERFILE}" \
         "--platform=${PLATFORMS}" \
         --build-arg "DOCKER_REGISTRY=${DOCKER_REGISTRY}" \
-        --tag "${DOCKER_REGISTRY}/rhasspy/rhasspy-tts-cli-hermes:latest" \
+        --tag "${DOCKER_REGISTRY}/rhasspy/rhasspy-remote-http-hermes:latest" \
         --push \
         "$@"

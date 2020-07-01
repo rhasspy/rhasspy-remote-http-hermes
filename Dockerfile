@@ -35,7 +35,8 @@ ENV LANG C.UTF-8
 
 RUN apt-get update && \
     apt-get install --no-install-recommends --yes \
-        python3 python3-setuptools python3-pip python3-venv
+        python3 python3-dev python3-setuptools python3-pip python3-venv \
+        build-essential
 
 FROM build-ubuntu as build-amd64
 
