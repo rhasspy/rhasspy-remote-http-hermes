@@ -1,6 +1,6 @@
 *
-!pyinstaller/dist
-!debian/bin
+!Makefile
 !requirements.txt
-!rhasspyremote_http_hermes
-!etc/
+!bin/rhasspy-remote-http-hermes
+!rhasspyremote_http_hermes/*.py
+!scripts/create-venv.sh
