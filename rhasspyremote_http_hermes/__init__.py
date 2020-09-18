@@ -678,7 +678,9 @@ class RemoteHermesMqtt(HermesClient):
                     sterr=asyncio.subprocess.PIPE,
                 )
 
-                output, error = await proc.communicate(json.dumps(json_graph).encode())
+                output, error = await proc.communicate(
+                    json.dumps(json_graph, ensure_ascii=False).encode()
+                )
 
                 if output:
                     _LOGGER.debug(output.decode())
@@ -735,7 +737,9 @@ class RemoteHermesMqtt(HermesClient):
                     stderr=asyncio.subprocess.PIPE,
                 )
 
-                output, error = await proc.communicate(json.dumps(json_graph).encode())
+                output, error = await proc.communicate(
+                    json.dumps(json_graph, ensure_ascii=False).encode()
+                )
 
                 if output:
                     _LOGGER.debug(output.decode())
@@ -786,7 +790,7 @@ class RemoteHermesMqtt(HermesClient):
                 # Check for speech response
                 tts_text = response_dict.get("speech", {}).get("text", "")
             elif self.handle_command:
-                intent_json = json.dumps(intent_dict)
+                intent_json = json.dumps(intent_dict, ensure_ascii=False)
 
                 # Local handling command
                 _LOGGER.debug(self.handle_command)
