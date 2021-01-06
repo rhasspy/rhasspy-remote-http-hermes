@@ -49,7 +49,13 @@ from rhasspyhermes.wake import (
     HotwordToggleOn,
     HotwordToggleReason,
 )
-from rhasspysilence import VoiceCommandRecorder, VoiceCommandResult, WebRtcVadRecorder
+
+from rhasspysilence import (
+    SilenceMethod,
+    VoiceCommandRecorder,
+    VoiceCommandResult,
+    WebRtcVadRecorder,
+)
 
 _LOGGER = logging.getLogger("rhasspyremote_http_hermes")
 
@@ -106,6 +112,10 @@ class RemoteHermesMqtt(HermesClient):
         silence_seconds: float = 0.5,
         before_seconds: float = 0.5,
         vad_mode: int = 3,
+        max_energy: typing.Optional[float] = None,
+        max_current_energy_ratio_threshold: typing.Optional[float] = None,
+        current_energy_threshold: typing.Optional[float] = None,
+        silence_method: SilenceMethod = SilenceMethod.VAD_ONLY,
         site_ids: typing.Optional[typing.List[str]] = None,
     ):
         super().__init__("rhasspyremote_http_hermes", client, site_ids=site_ids)
@@ -169,6 +179,10 @@ class RemoteHermesMqtt(HermesClient):
                 speech_seconds=speech_seconds,
                 silence_seconds=silence_seconds,
                 before_seconds=before_seconds,
+                silence_method=silence_method,
+                current_energy_threshold=current_energy_threshold,
+                max_energy=max_energy,
+                max_current_ratio_threshold=max_current_energy_ratio_threshold,
             )
 
         self.make_recorder = make_recorder or default_recorder
