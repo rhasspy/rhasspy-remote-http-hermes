@@ -108,6 +108,7 @@ class RemoteHermesMqtt(HermesClient):
         webhooks: typing.Optional[typing.Dict[str, typing.List[str]]] = None,
         skip_seconds: float = 0.0,
         min_seconds: float = 1.0,
+        max_seconds: typing.Optional[float] = None,
         speech_seconds: float = 0.3,
         silence_seconds: float = 0.5,
         before_seconds: float = 0.5,
@@ -169,10 +170,9 @@ class RemoteHermesMqtt(HermesClient):
         # Async HTTP
         self._http_session: typing.Optional[aiohttp.ClientSession] = None
 
-        # No timeout
         def default_recorder():
             return WebRtcVadRecorder(
-                max_seconds=None,
+                max_seconds=max_seconds,
                 vad_mode=vad_mode,
                 skip_seconds=skip_seconds,
                 min_seconds=min_seconds,

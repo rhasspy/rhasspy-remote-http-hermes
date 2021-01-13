@@ -101,6 +101,11 @@ def main():
         help="Minimum number of seconds for a voice command",
     )
     parser.add_argument(
+        "--voice-max-seconds",
+        type=float,
+        help="Maximum number of seconds for a voice command",
+    )
+    parser.add_argument(
         "--voice-speech-seconds",
         type=float,
         default=0.3,
@@ -204,6 +209,7 @@ def main():
         webhooks=webhooks,
         skip_seconds=args.voice_skip_seconds,
         min_seconds=args.voice_min_seconds,
+        max_seconds=args.voice_max_seconds,
         speech_seconds=args.voice_speech_seconds,
         silence_seconds=args.voice_silence_seconds,
         before_seconds=args.voice_before_seconds,
