@@ -276,13 +276,13 @@ class RemoteHermesMqtt(HermesClient):
 
             if self.nlu_url:
                 # Use remote server
-                _LOGGER.debug(self.nlu_url)
-
-                params = {}
+                params = {"siteId": query.site_id}
 
                 # Add intent filter
                 if query.intent_filter:
                     params["intentFilter"] = ",".join(query.intent_filter)
+
+                _LOGGER.debug("%s params=%s", self.nlu_url, params)
 
                 async with self.http_session.post(
                     self.nlu_url, data=input_text, params=params, ssl=self.ssl_context
@@ -392,7 +392,7 @@ class RemoteHermesMqtt(HermesClient):
                 # Remote text to speech server
                 _LOGGER.debug(self.tts_url)
 
-                params = {"play": "false"}
+                params = {"play": "false", "siteId": say.site_id}
                 if say.lang:
                     # Add ?language=<lang> query parameter
                     params["language"] = say.lang
@@ -585,13 +585,15 @@ class RemoteHermesMqtt(HermesClient):
             _LOGGER.debug("Received %s byte(s) of WAV data", len(wav_bytes))
 
             if self.asr_url:
-                _LOGGER.debug(self.asr_url)
+                params = {"siteId": stop_listening.site_id}
+                _LOGGER.debug("%s params=%s", self.asr_url, params)
 
                 # Remote ASR server
                 async with self.http_session.post(
                     self.asr_url,
                     data=wav_bytes,
                     headers={"Content-Type": "audio/wav", "Accept": "application/json"},
+                    params=params,
                     ssl=self.ssl_context,
                 ) as response:
                     response.raise_for_status()
