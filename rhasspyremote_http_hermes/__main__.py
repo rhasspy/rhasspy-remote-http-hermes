@@ -86,6 +86,7 @@ def main():
     parser.add_argument(
         "--webhook", nargs=2, action="append", help="Topic/URL pairs for webhook(s)"
     )
+    parser.add_argument("--lang", help="Set lang in hotword detected message")
 
     # Silence detection
     parser.add_argument(
@@ -219,6 +220,7 @@ def main():
         max_energy=args.voice_max_energy,
         max_current_energy_ratio_threshold=args.voice_max_current_energy_ratio_threshold,
         site_ids=args.site_id,
+        lang=args.lang,
     )
 
     _LOGGER.debug("Connecting to %s:%s", args.host, args.port)

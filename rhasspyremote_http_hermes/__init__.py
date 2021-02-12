@@ -118,6 +118,7 @@ class RemoteHermesMqtt(HermesClient):
         current_energy_threshold: typing.Optional[float] = None,
         silence_method: SilenceMethod = SilenceMethod.VAD_ONLY,
         site_ids: typing.Optional[typing.List[str]] = None,
+        lang: typing.Optional[str] = None,
     ):
         super().__init__("rhasspyremote_http_hermes", client, site_ids=site_ids)
 
@@ -205,6 +206,8 @@ class RemoteHermesMqtt(HermesClient):
         self.asr_sessions: typing.Dict[typing.Optional[str], AsrSession] = {}
 
         self.first_audio: bool = True
+
+        self.lang = lang
 
         # Start up
         if self.wake_command:
@@ -358,7 +361,7 @@ class RemoteHermesMqtt(HermesClient):
                         asr_tokens=[NluIntent.make_asr_tokens(tokens)],
                         raw_input=query.input,
                         wakeword_id=query.wakeword_id,
-                        lang=query.lang,
+                        lang=(query.lang or self.lang),
                         custom_data=query.custom_data,
                     ),
                     {"intent_name": intent_name},
@@ -541,6 +544,7 @@ class RemoteHermesMqtt(HermesClient):
                             model_type="personal",
                             current_sensitivity=1.0,
                             site_id=site_id,
+                            lang=self.lang,
                         ),
                         {"wakeword_id": wakeword_id},
                     )
@@ -638,7 +642,7 @@ class RemoteHermesMqtt(HermesClient):
                 seconds=float(transcription_dict.get("transcribe_seconds", 0)),
                 site_id=stop_listening.site_id,
                 session_id=stop_listening.session_id,
-                lang=session.start_listening.lang,
+                lang=(session.start_listening.lang or self.lang),
             )
 
             if session.start_listening.send_audio_captured:
