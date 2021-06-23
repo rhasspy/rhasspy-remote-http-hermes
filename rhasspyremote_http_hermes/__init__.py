@@ -16,7 +16,6 @@ import aiohttp
 import networkx as nx
 import rhasspynlu
 from paho.mqtt.matcher import MQTTMatcher
-
 from rhasspyhermes.asr import (
     AsrAudioCaptured,
     AsrError,

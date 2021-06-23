@@ -7,7 +7,6 @@ import typing
 from collections import defaultdict
 
 import paho.mqtt.client as mqtt
-
 import rhasspyhermes.cli as hermes_cli
 from rhasspysilence import SilenceMethod
 
